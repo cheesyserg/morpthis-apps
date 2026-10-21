@@ -21,9 +21,19 @@ in `Apps/doom/` on the card:
   freely licensed
 - `plutonia.wad`, `tnt.wad`, `chex.wad`, `hacx.wad`
 
-The shareware `doom1.wad` is enough to play the first episode. Doom reads the
-WAD on demand into a 6 MB zone; the zone and the WAD handles are released when
-the app leaves, so relaunching does not leak the player's memory.
+The shareware `doom1.wad` is enough to play the first episode. Before Doom
+starts, the app checks that the candidate is a real IWAD with `PLAYPAL`,
+`STBAR` and a map (`E1M1`, or `MAP01` for Doom II). A PWAD, a partial download
+or a modified/re-release WAD that lacks those is skipped and named on the
+error screen instead of failing inside the engine with `STBAR not found`. If a
+bad file sits next to a good one, the good one is used.
+
+Doom reads the WAD on demand into a 6 MB zone; the zone and the WAD handles are
+released when the app leaves, so relaunching does not leak the player's memory.
+
+The official shareware `doom1.wad` is 4,196,020 bytes and begins with `IWAD`.
+If your copy is shorter, it is a partial download or a different file; the
+error screen reports the size it found.
 
 ## Controls
 

@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "doom_port.h"
 #include "doomkeys.h"
@@ -51,6 +52,7 @@ static int g_fire_r;
 
 static bool g_doom_started;
 static bool g_quitting;
+static char g_wad_name[32];
 
 // ---------------------------------------------------------------------------
 // a 5x7 font, enough for the labels this app draws
@@ -532,8 +534,11 @@ static void on_doom_exited(void *unused) {
 
 	char error[512];
 	if (!g_quitting && dg_port_take_error(error, sizeof(error))) {
-		morpthis_loge("doom", "stopped: %s", error);
-		if (!show_error_screen(error)) {
+		morpthis_loge("doom", "stopped: %s (WAD %s)", error, g_wad_name);
+		char message[768];
+		snprintf(message, sizeof(message), "%s\n\nWAD: %s", error,
+				 g_wad_name[0] ? g_wad_name : "(unknown)");
+		if (!show_error_screen(message)) {
 			morpthis_toast("Doom stopped; see the log");
 			morpthis_app_quit();
 		}
@@ -558,14 +563,138 @@ static void request_quit(void) {
 	morpthis_app_quit();
 }
 
-static bool find_wad(char *out, size_t size) {
+// A WAD header is 12 bytes: "IWAD"/"PWAD", then a little-endian lump count
+// and directory offset. Directory entries are 16 bytes, with an 8-byte name at
+// offset 8. Doom fails with "W_GetNumForName: STBAR not found" when the file
+// is a PWAD, a partial download or another game's IWAD renamed, so check the
+// lumps Doom's startup actually needs and skip a bad candidate.
+static uint32_t wad_u32(const unsigned char *p) {
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+		   ((uint32_t)p[3] << 24);
+}
+
+static bool wad_is_doom2_name(const char *name) {
+	return strcasecmp(name, "doom2.wad") == 0 ||
+		   strcasecmp(name, "freedoom2.wad") == 0 ||
+		   strcasecmp(name, "plutonia.wad") == 0 ||
+		   strcasecmp(name, "tnt.wad") == 0 || strcasecmp(name, "hacx.wad") == 0;
+}
+
+static void wad_why(char *why, size_t why_size, const char *reason, long size) {
+	if (size >= 0) {
+		snprintf(why, why_size, "%s (%ld bytes)", reason, size);
+	} else {
+		snprintf(why, why_size, "%s", reason);
+	}
+}
+
+static bool check_wad(const char *name, char *why, size_t why_size) {
+	morpthis_file_t *file = morpthis_fs_open(name, MORPTHIS_FS_READ);
+	if (!file) {
+		snprintf(why, why_size, "cannot open");
+		return false;
+	}
+
+	long size = -1;
+	if (morpthis_fs_seek(file, 0, SEEK_END) == 0) {
+		size = morpthis_fs_tell(file);
+	}
+	if (morpthis_fs_seek(file, 0, SEEK_SET) != 0) {
+		snprintf(why, why_size, "cannot read");
+		morpthis_fs_close(file);
+		return false;
+	}
+
+	unsigned char header[12];
+	if (morpthis_fs_read(file, header, sizeof(header)) != sizeof(header)) {
+		wad_why(why, why_size, "not a WAD file", size);
+		morpthis_fs_close(file);
+		return false;
+	}
+	if (memcmp(header, "IWAD", 4) != 0) {
+		wad_why(why, why_size,
+				memcmp(header, "PWAD", 4) == 0 ? "a PWAD, not a standalone IWAD"
+											  : "not a Doom IWAD",
+				size);
+		morpthis_fs_close(file);
+		return false;
+	}
+
+	uint32_t lumps = wad_u32(header + 4);
+	uint32_t table = wad_u32(header + 8);
+	if (lumps == 0 || lumps > 100000 || table < sizeof(header)) {
+		wad_why(why, why_size, "broken WAD directory", size);
+		morpthis_fs_close(file);
+		return false;
+	}
+	if (morpthis_fs_seek(file, (long)table, SEEK_SET) != 0) {
+		wad_why(why, why_size, "broken WAD directory", size);
+		morpthis_fs_close(file);
+		return false;
+	}
+
+	bool playpal = false;
+	bool stbar = false;
+	bool e1m1 = false;
+	bool map01 = false;
+	unsigned char chunk[16 * 64];
+
+	while (lumps > 0 && !(playpal && stbar && (e1m1 || map01))) {
+		uint32_t entries = lumps > 64 ? 64 : lumps;
+		size_t want = (size_t)entries * 16;
+		if (morpthis_fs_read(file, chunk, want) != want) {
+			wad_why(why, why_size, "truncated WAD directory", size);
+			morpthis_fs_close(file);
+			return false;
+		}
+		for (uint32_t i = 0; i < entries; i++) {
+			char lump[9];
+			memcpy(lump, chunk + i * 16 + 8, 8);
+			lump[8] = '\0';
+			if (strcmp(lump, "PLAYPAL") == 0) {
+				playpal = true;
+			} else if (strcmp(lump, "STBAR") == 0) {
+				stbar = true;
+			} else if (strcmp(lump, "E1M1") == 0) {
+				e1m1 = true;
+			} else if (strcmp(lump, "MAP01") == 0) {
+				map01 = true;
+			}
+		}
+		lumps -= entries;
+	}
+	morpthis_fs_close(file);
+
+	if (!playpal) {
+		wad_why(why, why_size, "missing PLAYPAL", size);
+		return false;
+	}
+	if (!stbar) {
+		wad_why(why, why_size, "missing STBAR", size);
+		return false;
+	}
+	if (wad_is_doom2_name(name)) {
+		if (!map01) {
+			wad_why(why, why_size, "no MAP01 map", size);
+			return false;
+		}
+	} else if (!e1m1) {
+		wad_why(why, why_size, "no E1M1 map", size);
+		return false;
+	}
+	return true;
+}
+
+static bool find_wad(char *out, size_t size, char *why, size_t why_size) {
 	static const char *names[] = {
 		"doom2.wad", "doom.wad", "doom1.wad", "freedoom2.wad", "freedoom1.wad",
 		"plutonia.wad", "tnt.wad", "chex.wad", "hacx.wad",
 	};
 
+	why[0] = '\0';
 	const char *folder = morpthis_fs_app_folder();
 	if (!folder || !folder[0]) {
+		snprintf(why, why_size, "the app folder is not available");
 		return false;
 	}
 
@@ -578,13 +707,26 @@ static bool find_wad(char *out, size_t size) {
 			}
 		}
 
+		const char *actual = NULL;
 		if (morpthis_fs_exists(names[i])) {
-			snprintf(out, size, "%s/%s", folder, names[i]);
+			actual = names[i];
+		} else if (morpthis_fs_exists(upper)) {
+			actual = upper;
+		}
+		if (!actual) {
+			continue;
+		}
+
+		char reason[96];
+		if (check_wad(actual, reason, sizeof(reason))) {
+			snprintf(out, size, "%s/%s", folder, actual);
+			snprintf(g_wad_name, sizeof(g_wad_name), "%s", actual);
 			return true;
 		}
-		if (morpthis_fs_exists(upper)) {
-			snprintf(out, size, "%s/%s", folder, upper);
-			return true;
+
+		morpthis_logw("doom", "ignoring %s: %s", actual, reason);
+		if (why[0] == '\0') {
+			snprintf(why, why_size, "%s: %s", actual, reason);
 		}
 	}
 	return false;
@@ -625,15 +767,29 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	compute_layout();
 
 	char wad[512];
-	if (!find_wad(wad, sizeof(wad))) {
-		morpthis_logw("doom", "no IWAD in %s", morpthis_fs_app_folder());
-		if (!show_error_screen("No WAD file was found. Copy the shareware doom1.wad "
-							   "(or your own doom.wad / doom2.wad) into the app "
-							   "folder on the card, then start Doom again.")) {
-			return 1;
+	char why[256];
+	if (!find_wad(wad, sizeof(wad), why, sizeof(why))) {
+		if (why[0]) {
+			morpthis_loge("doom", "no usable IWAD: %s", why);
+			char message[512];
+			snprintf(message, sizeof(message),
+					 "%s\n\nDoom needs a complete IWAD: the shareware doom1.wad, "
+					 "a doom.wad/doom2.wad you own, or a Freedoom WAD.",
+					 why);
+			if (!show_error_screen(message)) {
+				return 1;
+			}
+		} else {
+			morpthis_logw("doom", "no IWAD in %s", morpthis_fs_app_folder());
+			if (!show_error_screen("No WAD file was found. Copy the shareware doom1.wad "
+								   "(or your own doom.wad / doom2.wad) into the app "
+								   "folder on the card, then start Doom again.")) {
+				return 1;
+			}
 		}
 		return 0;
 	}
+	morpthis_logi("doom", "using IWAD %s", wad);
 
 	size_t available = morpthis_app_mem_available();
 	if (available != SIZE_MAX && available < (size_t)8 * 1024 * 1024) {
