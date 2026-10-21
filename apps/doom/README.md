@@ -1,4 +1,4 @@
-# Doom
+# doomgeneric
 
 The classic Doom engine on the player's Apps page, built from
 [doomgeneric](https://github.com/ozkl/doomgeneric) and driven by the Morpthis
@@ -30,7 +30,8 @@ or a modified/re-release WAD that lacks those is skipped and named on the
 error screen instead of failing inside the engine with `STBAR not found`. If a
 bad file sits next to a good one, the good one is used.
 
-Doom reads the WAD on demand into a 6 MB zone; the zone and the WAD handles are
+Doom reads the WAD on demand into a 6 MB zone and the mixer keeps a 4 MB cache
+of resampled sound effects; the zone, the sound cache and the WAD handles are
 released when the app leaves, so relaunching does not leak the player's memory.
 
 The official shareware `doom1.wad` is 4,196,020 bytes and begins with `IWAD`.
@@ -45,7 +46,7 @@ readable underneath.
 
 | Control | What it does |
 | --- | --- |
-| D-pad | Up/down moves, left/right turns; diagonals work |
+| D-pad | Up/down moves forward/back, left/right strafes; diagonals work |
 | `FIRE` | Fire the weapon; a tap on the picture also fires |
 | `USE` | Open doors, press switches |
 | `RUN` | Hold to run |
@@ -60,24 +61,25 @@ The physical keys use the same landscape idea:
 
 | Key | Action |
 | --- | --- |
-| PLAY/PAUSE | Fire (a short burst) |
+| PLAY/PAUSE | Use (open doors, press switches) |
 | NEXT | Next weapon |
-| PREV | Use (open doors, press switches) |
-| VOLUME UP / DOWN | Strafe right / left while playing |
+| PREV | Fire; hold to fire continuously |
+| VOLUME UP / DOWN | Turn the camera right / left while playing |
 | POWER | Menu |
 | BACK | Leave the app, when the player delivers it |
 
-The volume keys are contextual. While a level is being played they strafe. In
-Doom's menu, on the pause screen, on intermission/finale screens and while
-Doom is loading, the game hands them back and they adjust the player's volume
-as usual. The app tells the player which state it is in with
-`morpthis_input_set_gameplay()`; this needs a player that implements that call.
+The volume keys are contextual. While a level is being played they turn the
+camera; volume up turns right and volume down turns left. In Doom's menu, on
+the pause screen, on intermission/finale screens and while Doom is loading, the
+game hands them back and they adjust the player's volume as usual. The app
+tells the player which state it is in with `morpthis_input_set_gameplay()`;
+this needs a player that implements that call.
 
-Doom turns left and right with the D-pad and strafes with the volume keys,
-which keeps the two axes apart for touch play. The player reports the physical
-transport and volume keys as press-only, so each press is turned into a short
-hold and released by the port itself. Holding a volume key repeats the press,
-which keeps strafing until it is let go.
+The on-screen D-pad is movement: up/down walk, left/right strafe, and the
+volume keys turn. The player reports the physical keys as repeated presses
+rather than release events, so the port turns each press into a short hold and
+lets repeats extend it. The previous-track key therefore fires and the volume
+keys turn for as long as they are held.
 
 ## Saving
 
@@ -87,10 +89,16 @@ as gamma and screen size reset on each launch. Savegames do survive.
 
 ## Sound
 
-This build is silent. `doomgeneric`'s sound support is the SDL mixer, which is
-not available here; wiring Doom's `sound_module_t` to `morpthis_audio_open()`/
-`write()` is a possible follow-up. The game is played with `-nosound
--nomusic`.
+Sound effects are mixed in the app and written straight to the player's DAC
+through `morpthis_audio_open()`/`morpthis_audio_write()`. Doom's WAD stores
+effects as unsigned 8-bit mono at their own rate; the port resamples each one
+once to 16-bit 44.1 kHz, caches it in a 4 MB LRU cache, and mixes up to sixteen
+channels with Doom's volume and stereo separation. The mixer has its own
+thread because writes block at the speed the DAC plays.
+
+Music is not implemented yet, so the game runs with `-nomusic`. Taking the raw
+output stops the player's playback; it does not resume by itself when Doom
+exits, exactly as with any other app that opens the DAC.
 
 ## Building
 
@@ -123,7 +131,9 @@ and asks the player to release playback and caches before loading.
 `src/doom_port.c` implements doomgeneric's platform interface (`DG_Init`,
 `DG_DrawFrame`, `DG_SleepMs`, `DG_GetTicksMs`, `DG_GetKey`, `DG_SetWindowTitle`)
 and the `MORPTHIS_PORT` hooks. `src/main.c` owns the SDK canvas, the control
-drawing and the app lifecycle.
+drawing and the app lifecycle. `src/doom_sound.c` supplies doomgeneric's
+`sound_module_t`: it loads and resamples WAD effects, mixes them, and runs the
+blocking PCM writes on its own thread.
 
 The port needs a few small changes in the doomgeneric sources, all guarded by
 `MORPTHIS_PORT` or generic fixes. They are kept in
@@ -141,6 +151,7 @@ or set `DOOMGENERIC_DIR` to an already patched checkout.
 | --- | --- |
 | `i_system.c` | `I_Quit()` tells the host to unload the game; `I_Error()` unwinds to the Doom thread instead of `exit()` |
 | `d_main.c` | The ENDOOM screen does not call `exit(0)` |
+| `i_sound.c` | The port supplies its own sound module instead of SDL_mixer; music stays disabled |
 | `m_config.c` | The default config dir is the app folder, not the player's working directory |
 | `doomgeneric.c` | `DG_ScreenBuffer` is sized by `sizeof(pixel_t)` so `CMAP256` uses one byte per pixel |
 | `z_zone.c` / `z_zone.h` | `Z_Shutdown()` releases the zone when the plugin is unloaded |

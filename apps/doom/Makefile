@@ -25,7 +25,7 @@ APP_TEST_SCRIPT := sleep:200; press:back
 # RGB565 when it hands a frame to the canvas.
 DOOM_CFLAGS := -O2 -g -std=gnu11 -D_DEFAULT_SOURCE \
 	-DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
-	-DNORMALUNIX -DLINUX -DMORPTHIS_PORT \
+	-DNORMALUNIX -DLINUX -DMORPTHIS_PORT -DFEATURE_SOUND \
 	-I$(DOOMGENERIC_DIR) -Isrc
 
 include $(MORPTHIS_SDK)/app.mk
@@ -52,10 +52,11 @@ DOOM_SRCS := $(filter-out \
 
 DOOM_OBJS := $(patsubst $(DOOMGENERIC_DIR)/%.c,$(BUILD_DIR)/doomobj/%.o,$(DOOM_SRCS))
 DOOM_PORT_OBJ := $(BUILD_DIR)/doom_port.o
+DOOM_SOUND_OBJ := $(BUILD_DIR)/doom_sound.o
 
 # The Doom objects must precede the libraries on the link line.
-MORPTHIS_LIBS := $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(MORPTHIS_LIBS)
-$(APP_BIN): $(DOOM_OBJS) $(DOOM_PORT_OBJ)
+MORPTHIS_LIBS := $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ) $(MORPTHIS_LIBS)
+$(APP_BIN): $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ)
 
 $(BUILD_DIR)/doomobj/%.o: $(DOOMGENERIC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -65,4 +66,8 @@ $(DOOM_PORT_OBJ): src/doom_port.c src/doom_port.h
 	@mkdir -p $(dir $@)
 	$(MORPTHIS_CC) $(MORPTHIS_CFLAGS) $(DOOM_CFLAGS) -MMD -MP -c $< -o $@
 
--include $(DOOM_OBJS:.o=.d) $(DOOM_PORT_OBJ:.o=.d)
+$(DOOM_SOUND_OBJ): src/doom_sound.c
+	@mkdir -p $(dir $@)
+	$(MORPTHIS_CC) $(MORPTHIS_CFLAGS) $(DOOM_CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(DOOM_OBJS:.o=.d) $(DOOM_PORT_OBJ:.o=.d) $(DOOM_SOUND_OBJ:.o=.d)

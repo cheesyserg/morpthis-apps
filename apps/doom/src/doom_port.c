@@ -21,6 +21,7 @@
 #include "doomgeneric.h"
 #include "doomkeys.h"
 #include "doomstat.h"
+#include "i_sound.h"
 #include "i_system.h"
 #include "i_video.h"
 #include "m_controls.h"
@@ -260,6 +261,10 @@ static void doom_cleanup(void) {
 	}
 	g_cleanup_done = true;
 
+	// Stop the mixer before the WAD handles and the zone go away. I_Quit()
+	// normally does this through S_Shutdown; a fatal error does not.
+	I_ShutdownSound();
+
 	// D_AddFile discards the handle, but every lump points at it. Close each
 	// distinct WAD so the card's file descriptors do not leak between launches.
 	for (unsigned int i = 0; i < numlumps; i++) {
@@ -292,20 +297,19 @@ static void *doom_thread_main(void *unused) {
 
 	extern boolean advancedemo;
 
-	char *argv[9];
+	char *argv[8];
 	argv[0] = (char *)"doom";
 	argv[1] = (char *)"-iwad";
 	argv[2] = g_wad_path;
-	argv[3] = (char *)"-nosound";
-	argv[4] = (char *)"-nomusic";
-	argv[5] = (char *)"-nogui";
-	argv[6] = (char *)"-mb";
-	argv[7] = (char *)"6";
-	argv[8] = NULL;
+	argv[3] = (char *)"-nomusic";
+	argv[4] = (char *)"-nogui";
+	argv[5] = (char *)"-mb";
+	argv[6] = (char *)"6";
+	argv[7] = NULL;
 
 	g_fatal_ready = true;
 	if (setjmp(g_fatal_jmp) == 0) {
-		doomgeneric_Create(8, argv);
+		doomgeneric_Create(7, argv);
 
 		// Chocolate Doom leaves the next/previous weapon keys unbound. The
 		// player's side keys send these, so bind them once the config has

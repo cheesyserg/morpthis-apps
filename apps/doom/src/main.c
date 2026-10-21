@@ -365,8 +365,8 @@ static void update_dpad(int x, int y) {
 	int dy = y - g_dpad_cy;
 	int dead = g_dpad_r / 4;
 
-	set_dir(&g_dir_left, dx < -dead, KEY_LEFTARROW);
-	set_dir(&g_dir_right, dx > dead, KEY_RIGHTARROW);
+	set_dir(&g_dir_left, dx < -dead, KEY_STRAFE_L);
+	set_dir(&g_dir_right, dx > dead, KEY_STRAFE_R);
 	set_dir(&g_dir_up, dy < -dead, KEY_UPARROW);
 	set_dir(&g_dir_down, dy > dead, KEY_DOWNARROW);
 }
@@ -374,8 +374,8 @@ static void update_dpad(int x, int y) {
 static void release_owner(void) {
 	switch (g_owner) {
 	case OWN_DPAD:
-		set_dir(&g_dir_left, false, KEY_LEFTARROW);
-		set_dir(&g_dir_right, false, KEY_RIGHTARROW);
+		set_dir(&g_dir_left, false, KEY_STRAFE_L);
+		set_dir(&g_dir_right, false, KEY_STRAFE_R);
 		set_dir(&g_dir_up, false, KEY_UPARROW);
 		set_dir(&g_dir_down, false, KEY_DOWNARROW);
 		break;
@@ -478,19 +478,24 @@ static void button_cb(morpthis_button_t button, morpthis_input_action_t action, 
 
 	switch (button) {
 	case MORPTHIS_BUTTON_PLAY_PAUSE:
-		dg_port_pulse_key(KEY_FIRE, 150);
+		// Use. One press is enough; this key is not repeated during play.
+		dg_port_pulse_key(KEY_USE, 150);
 		break;
 	case MORPTHIS_BUTTON_NEXT:
 		dg_port_pulse_key(']', 120);
 		break;
 	case MORPTHIS_BUTTON_PREV:
-		dg_port_pulse_key(KEY_USE, 120);
+		// Fire. The player repeats this key while it is held during active
+		// play, and each repeat extends the same hold.
+		dg_port_pulse_key(KEY_FIRE, 150);
 		break;
 	case MORPTHIS_BUTTON_VOLUME_UP:
-		dg_port_pulse_key(KEY_STRAFE_R, 100);
+		// Camera turn. Longer than the player's repeat period, so repeated
+		// presses extend the same hold and a held key turns continuously.
+		dg_port_pulse_key(KEY_RIGHTARROW, 150);
 		break;
 	case MORPTHIS_BUTTON_VOLUME_DOWN:
-		dg_port_pulse_key(KEY_STRAFE_L, 100);
+		dg_port_pulse_key(KEY_LEFTARROW, 150);
 		break;
 	case MORPTHIS_BUTTON_POWER:
 		dg_port_pulse_key(KEY_ESCAPE, 120);
@@ -552,14 +557,14 @@ static void error_button_cb(morpthis_button_t button, morpthis_input_action_t ac
 }
 
 static bool show_error_screen(const char *message) {
-	morpthis_screen_t *screen = morpthis_screen_create("Doom");
+	morpthis_screen_t *screen = morpthis_screen_create("doomgeneric");
 	if (!screen) {
 		return false;
 	}
 
 	int width = morpthis_ui_width();
 	int height = morpthis_ui_height();
-	morpthis_widget_t *title = morpthis_label_create(screen, "Doom could not start");
+	morpthis_widget_t *title = morpthis_label_create(screen, "doomgeneric could not start");
 	morpthis_widget_set_pos(title, 20, 20);
 	morpthis_widget_set_size(title, width - 40, 28);
 
@@ -786,7 +791,7 @@ static bool find_wad(char *out, size_t size, char *why, size_t why_size) {
 }
 
 static bool game_setup(void) {
-	g_screen = morpthis_screen_create("Doom");
+	g_screen = morpthis_screen_create("doomgeneric");
 	if (!g_screen) {
 		return false;
 	}
@@ -846,7 +851,10 @@ int morpthis_app_main(const morpthis_app_t *app) {
 
 	size_t available = morpthis_app_mem_available();
 	size_t frame_bytes = (size_t)g_panel_w * (size_t)g_panel_h * sizeof(uint16_t) * 2;
-	size_t needed = (size_t)6 * 1024 * 1024 + frame_bytes + (size_t)2 * 1024 * 1024;
+	// 6 MB zone, the 4 MB sound cache, both frame buffers and slack for the
+	// mixer, threads and the WAD handles.
+	size_t needed = (size_t)6 * 1024 * 1024 + (size_t)4 * 1024 * 1024 + frame_bytes +
+					(size_t)2 * 1024 * 1024;
 	if (available != SIZE_MAX && available < needed) {
 		morpthis_loge("doom", "only %zu bytes available, need about %zu", available, needed);
 		if (!show_error_screen("Not enough free memory to start Doom. Close other "

@@ -141,6 +141,26 @@
  void*	Z_Malloc (int size, int tag, void *ptr);
  void    Z_Free (void *ptr);
  void    Z_FreeTags (int lowtag, int hightag);
+--- a/doomgeneric/i_sound.c
++++ b/doomgeneric/i_sound.c
+@@ -18,7 +18,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+
+-#if defined(FEATURE_SOUND) && !defined(__DJGPP__)
++#if defined(FEATURE_SOUND) && !defined(__DJGPP__) && !defined(MORPTHIS_PORT)
+ #include <SDL_mixer.h>
+ #endif
+
+@@ -130,7 +130,7 @@ static void InitSfxModule(boolean use_sfx_prefix)
+
+ static void InitMusicModule(void)
+ {
+-#ifdef FEATURE_SOUND
++#if defined(FEATURE_SOUND) && !defined(MORPTHIS_PORT)
+     music_module = &DG_music_module;
+ #endif /* FEATURE_SOUND */
+ }
 --- a/doomgeneric/w_wad.c
 +++ b/doomgeneric/w_wad.c
 @@ -189,6 +189,11 @@
