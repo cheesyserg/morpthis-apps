@@ -1338,9 +1338,17 @@ static void render(bool whole) {
 static pthread_t tick_thread;
 static volatile bool tick_running;
 static bool tick_started;
+// At most one tick in the player's queue. A thread that keeps posting while the
+// GUI is behind would leave a backlog of frames that are all in the past; a
+// dropped tick costs one step, and the elapsed-time logic below already handles
+// that. `tick_pending_since` lets the clock recover if the player dropped a
+// post because its queue was full.
+static volatile bool tick_pending;
+static volatile int64_t tick_pending_since;
 
 static void tick_posted(void *unused) {
 	(void)unused;
+	tick_pending = false;
 	if (!active) {
 		return;
 	}
@@ -1418,9 +1426,18 @@ static void *tick_main(void *unused) {
 	const struct timespec delay = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
 	while (tick_running) {
 		(void)nanosleep(&delay, NULL);
-		if (tick_running) {
-			morpthis_app_post(tick_posted, NULL);
+		if (!tick_running) {
+			break;
 		}
+		if (tick_pending) {
+			if (now_us() - tick_pending_since < 250000) {
+				continue; // the previous tick has not run yet
+			}
+			tick_pending = false; // the player dropped that post
+		}
+		tick_pending_since = now_us();
+		tick_pending = true;
+		morpthis_app_post(tick_posted, NULL);
 	}
 	return NULL;
 }
