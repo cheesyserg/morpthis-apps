@@ -123,10 +123,13 @@ touches widgets. `morpthis_app_shutdown()` stops and joins both threads before
 the player unloads the shared object, including when USB mass storage closes
 the app to share the card.
 
-The player opens at its usual PCM depth: `morpthis_audio_open(..., 0)`, the
-8 x 4096-frame frame-based sizing local playback uses. A 120 ms time-based
-request made the V1's ALSA reject the HW parameters (`buffer 120000 us /
-period 30000 us`, `EINVAL`), so the app does not ask for a short game buffer.
+The player opens at its usual PCM depth: `morpthis_audio_open(..., 0)` selects
+the deep frame-based sizing (8 x 4096 frames, about 750 ms) regardless of the
+local playback `[audio] buffer_time_ms` setting. That depth is what rides out a
+network stall without an underrun; the player drops it on stop, so leaving the
+app is not delayed by it. Explicit time-based requests (the games' short
+game buffer) are aligned to the AIC's DMA and fall back to the frame-based
+depth when the driver refuses them, so a 44.1 kHz track does not fail at open.
 
 The vendored `http.c` adds `http_abort_all()`, which shuts down the app's open
 sockets instead of closing them; the owning thread still closes them. That is
