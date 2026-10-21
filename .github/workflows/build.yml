@@ -28,9 +28,17 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/morpthis-sdk
           path: sdk
+      - name: Fetch doomgeneric
+        uses: actions/checkout@v4
+        with:
+          repository: ozkl/doomgeneric
+          ref: e257a09527062bfb986b6e5e0780839b6cbd5b71
+          path: doomgeneric
+      - name: Apply the Morpthis Doom port
+        run: git -C doomgeneric apply "$GITHUB_WORKSPACE/apps/doom/doomgeneric-morpthis.patch"
       - name: Build and test
-        run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" test
+        run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" test
       # Packaging logic only: host-mode .mapp files are not shipped. Device
       # packages come from morpthis-build.
       - name: Dry-run the packaging
-        run: make MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" package
+        run: make MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" package

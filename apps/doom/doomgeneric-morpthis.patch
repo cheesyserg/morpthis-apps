@@ -1,0 +1,157 @@
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -51,6 +51,12 @@
+ #include "w_wad.h"
+ #include "z_zone.h"
+ 
++#ifdef MORPTHIS_PORT
++// The player loads Doom as a plugin in its own process: the game may not
++// call exit(), and a normal quit has to come back to the host.
++#include "doom_port.h"
++#endif
++
+ #ifdef __MACOSX__
+ #include <CoreFoundation/CFUserNotification.h>
+ #endif
+@@ -257,6 +263,11 @@
+         entry = entry->next;
+     }
+ 
++#ifdef MORPTHIS_PORT
++    // Doom's own quit path: unwind to the host instead of ending the player.
++    DG_RequestQuit();
++#endif
++
+ #if ORIGCODE
+     SDL_Quit();
+ 
+@@ -403,6 +414,13 @@
+         entry = entry->next;
+     }
+ 
++#ifdef MORPTHIS_PORT
++    // A fatal error unwinds the Doom thread; the app shows the message and
++    // lets the user leave. Never run zenity, exit the player or abort.
++    DG_FatalError(msgbuf);
++    return;
++#endif
++
+     exit_gui_popup = !M_ParmExists("-nogui");
+ 
+     // Pop up a GUI dialog box to show the error message, if the
+--- a/doomgeneric/d_main.c
++++ b/doomgeneric/d_main.c
+@@ -1082,7 +1082,13 @@
+ 
+     I_Endoom(endoom);
+ 
++#ifdef MORPTHIS_PORT
++    // ENDOOM is a process-ending screen on a desktop. In the player the
++    // normal I_Quit path has already told the host to unload the game.
++    return;
++#else
+ 	exit(0);
++#endif
+ }
+ 
+ #if ORIGCODE
+--- a/doomgeneric/m_config.c
++++ b/doomgeneric/m_config.c
+@@ -35,6 +35,10 @@
+ 
+ #include "z_zone.h"
+ 
++#ifdef MORPTHIS_PORT
++#include "doom_port.h"
++#endif
++
+ //
+ // DEFAULTS
+ //
+@@ -2042,11 +2046,17 @@
+ 
+ static char *GetDefaultConfigDir(void)
+ {
++#ifdef MORPTHIS_PORT
++    // The app runs inside the player, whose working directory is not the
++    // app's. Keep default.cfg and savegames beside the game instead.
++    return (char *) DG_GetBaseDir();
++#else
+     char *result = (char *)malloc(2);
+     result[0] = '.';
+     result[1] = '\0';
+ 
+     return result;
++#endif
+ }
+ 
+ // 
+--- a/doomgeneric/doomgeneric.c
++++ b/doomgeneric/doomgeneric.c
+@@ -18,7 +18,7 @@
+ 
+ 	M_FindResponseFile();
+ 
+-	DG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * 4);
++	DG_ScreenBuffer = malloc(DOOMGENERIC_RESX * DOOMGENERIC_RESY * sizeof(pixel_t));
+ 
+ 	DG_Init();
+ 
+--- a/doomgeneric/z_zone.c
++++ b/doomgeneric/z_zone.c
+@@ -17,6 +17,8 @@
+ //
+ 
+ 
++#include <stdlib.h>
++
+ #include "z_zone.h"
+ #include "i_system.h"
+ #include "doomtype.h"
+@@ -120,6 +122,22 @@
+ }
+ 
+ 
++//
++// Z_Shutdown
++//
++// Releases the whole zone. A port that unloads Doom without exiting the
++// process (a plugin) calls this after the game has stopped.
++//
++void Z_Shutdown (void)
++{
++    if (mainzone != NULL)
++    {
++        free(mainzone);
++        mainzone = NULL;
++    }
++}
++
++
+ //
+ // Z_Free
+ //
+--- a/doomgeneric/z_zone.h
++++ b/doomgeneric/z_zone.h
+@@ -51,6 +51,7 @@
+         
+ 
+ void	Z_Init (void);
++void	Z_Shutdown (void);
+ void*	Z_Malloc (int size, int tag, void *ptr);
+ void    Z_Free (void *ptr);
+ void    Z_FreeTags (int lowtag, int hightag);
+--- a/doomgeneric/w_wad.c
++++ b/doomgeneric/w_wad.c
+@@ -189,6 +189,11 @@
+ 			// Homebrew levels?
+ 			if (strncmp(header.identification,"PWAD",4))
+ 			{
++#ifdef MORPTHIS_PORT
++				// The handle is not reachable through lumpinfo yet, so the
++				// port's shutdown would not close it.
++				W_CloseFile(wad_file);
++#endif
+ 			I_Error ("Wad file %s doesn't have IWAD "
+ 				 "or PWAD id\n", filename);
+ 			}

@@ -1,0 +1,11 @@
+{
+  "id": "doom",
+  "name": "Doom",
+  "version": "1.0.0",
+  "entry": "doom",
+  "icon": "icon.png",
+  "description": "The classic shareware Doom, with touch controls",
+  "category": "game",
+  "tier": "heavy",
+  "min_player": 1
+}

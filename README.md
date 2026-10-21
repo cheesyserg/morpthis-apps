@@ -9,9 +9,10 @@ them with the SDK, validates the manifests and packages the result as a
 `.mapp`.
 
 **Status.** Foundation. `calculator` is an in-process UI app with the SDK;
-`flappybird` is a game with its own clock and PCM mixer; `checksum` is a
-headless tool that the player runs through its `fork`/`execve` path. All three
-paths are in the player now; see the SDK's `docs/player-integration.md`.
+`flappybird` is a game with its own clock and PCM mixer; `doom` runs the
+Doom engine from a sibling `doomgeneric` checkout; `checksum` is a headless
+tool that the player runs through its `fork`/`execve` path. All three kinds of
+app are in the player now; see the SDK's `docs/player-integration.md`.
 
 ## Quick start
 
@@ -30,11 +31,23 @@ morpthis/
   morpthis-player/
 ```
 
+`doom` also needs the doomgeneric checkout next to it:
+
+```text
+morpthis/
+  morpthis-apps/
+  morpthis-sdk/
+  doomgeneric/
+```
+
 Set `MORPTHIS_SDK` if it lives elsewhere:
 
 ```sh
 make MORPTHIS_SDK=/path/to/morpthis-sdk test
 ```
+
+Set `DOOMGENERIC_DIR` if the patched doomgeneric checkout lives elsewhere; see
+[apps/doom/README.md](apps/doom/README.md) for the patch and the game data.
 
 ## Layout
 
@@ -42,6 +55,7 @@ make MORPTHIS_SDK=/path/to/morpthis-sdk test
 apps/
   calculator/      app.json, icon.png, src/main.c, Makefile
   checksum/        app.json, src/main.c, Makefile
+  doom/            app.json, icon.png, src/, Makefile
   flappybird/      app.json, icon.png, src/main.c, assets/, Makefile
 tools/
   validate-manifest.py
@@ -148,7 +162,9 @@ and the minimum player build. The player does not download anything.
 
 ## What not to put here
 
-- ROMs, BIOS files or copyrighted game assets.
+- ROMs, BIOS files, Doom WADs or other copyrighted game assets (Freedoom and
+  the shareware `doom1.wad` are the exceptions; they are freely licensed, but
+  still belong on the card rather than in the repository).
 - Streaming credentials or API keys.
 - A copy of the player's source. The SDK is the interface; the player is a
   separate repository.
