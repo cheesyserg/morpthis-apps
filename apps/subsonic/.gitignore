@@ -1,0 +1,4 @@
+build/
+# A settings.json here is only from running the app by hand with the app folder
+# as its data folder; `make test` uses build/host/data instead.
+settings.json

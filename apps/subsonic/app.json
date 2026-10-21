@@ -1,0 +1,11 @@
+{
+  "id": "subsonic",
+  "name": "Subsonic",
+  "version": "0.1.0",
+  "entry": "subsonic",
+  "icon": "icon.png",
+  "description": "Stream music from a Subsonic or Gonic server",
+  "category": "app",
+  "tier": "heavy",
+  "min_player": 1
+}

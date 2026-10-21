@@ -3,16 +3,18 @@
 The apps that run on the Morpthis player, built against
 [morpthis-sdk](https://github.com/morpthis/morpthis-sdk).
 
-An app is a folder under `Apps/` on the card: `app.json`, an optional icon, and
-the entry binary. This repository holds the source for those folders, builds
-them with the SDK, validates the manifests and packages the result as a
-`.mapp`.
+An app is one `.pkgmerp` file on the card under `Apps/pkgmerps/`: an
+uncompressed squashfs image holding `app.json`, an optional icon and the entry
+binary. This repository holds the source for those images, builds them with the
+SDK, validates the manifests and packages the result as a `.pkgmerp`.
 
 **Status.** Foundation. `calculator` is an in-process UI app with the SDK;
 `flappybird` is a game with its own clock and PCM mixer; `doom` runs the
 Doom engine from a sibling `doomgeneric` checkout; `checksum` is a headless
-tool that the player runs through its `fork`/`execve` path. All three kinds of
-app are in the player now; see the SDK's `docs/player-integration.md`.
+tool that the player runs through its `fork`/`execve` path; `subsonic` is a
+network streaming app with its own HTTP/TLS stack and an MP3 decoder. They all
+run through the player's app paths; see the SDK's
+`docs/player-integration.md`.
 
 ## Quick start
 
@@ -49,6 +51,12 @@ make MORPTHIS_SDK=/path/to/morpthis-sdk test
 Set `DOOMGENERIC_DIR` if the patched doomgeneric checkout lives elsewhere; see
 [apps/doom/README.md](apps/doom/README.md) for the patch and the game data.
 
+`subsonic` also has a loopback integration test that needs no server:
+
+```sh
+make -C apps/subsonic MORPTHIS_MODE=host test-integration
+```
+
 ## Layout
 
 ```text
@@ -57,6 +65,7 @@ apps/
   checksum/        app.json, src/main.c, Makefile
   doom/            app.json, icon.png, src/, Makefile
   flappybird/      app.json, icon.png, src/main.c, assets/, Makefile
+  subsonic/        app.json, icon.png, src/, tests/, Makefile
 tools/
   validate-manifest.py
   package.sh
@@ -86,7 +95,8 @@ top-level build loops over `apps/*`.
 
 4. Write `morpthis_app_main()`, set up a screen and return. Log one line on
    start and one on exit.
-5. `make test`, then `make package` with the cross toolchain.
+5. `make test`, then `make package` with the cross toolchain and
+   `squashfs-tools` installed.
 
 The full checklist and the manifest fields are in
 [docs/adding-an-app.md](docs/adding-an-app.md).
@@ -99,7 +109,7 @@ The full checklist and the manifest fields are in
 | `make test` | the same, then runs each app's smoke test |
 | `make device` | MIPS plugins/executables with the pinned toolchain |
 | `make check-abi` | device build and the glibc/GLIBCXX check |
-| `make package` | device build and a `.mapp` per app in `dist/` |
+| `make package` | device build and a `.pkgmerp` per app in `dist/` |
 
 A UI app has `APP_KIND := plugin` (the default): a shared object named after the
 app. A headless tool sets `APP_KIND := exe`. The player loads plugins
@@ -129,22 +139,30 @@ rules it applies: `entry` and `icon` are relative, with no backslash and no
 make package
 ```
 
-writes `dist/<id>-<version>.mapp`. A package is a zip with the app folder at its
-root:
+writes `dist/<id>.pkgmerp`. A package is an uncompressed squashfs image with the
+app folder at its root:
 
 ```text
-calculator-1.0.0.mapp
+calculator.pkgmerp
   app.json
   icon.png
   calculator
 ```
 
-Copy or extract it to `Apps/<id>/` on the card. There is no install step in the
-player yet.
+Uncompressed is deliberate: the player mounts the image read-only through a
+loop device, and the kernel then serves its data straight from the card through
+the page cache, with no decompression workspace. The file is larger than a zip;
+the player has more card than RAM. `mksquashfs` from `squashfs-tools` must be on
+the build machine.
+
+The name carries no version. Copy `dist/<id>.pkgmerp` to
+`Apps/pkgmerps/<id>.pkgmerp` on the card; the app's writable files already live
+in `merp_data/<id>/`, outside the image, so replacing the package keeps them.
+There is no install step in the player yet.
 
 ## Releases
 
-One GitHub release per app version, with the `.mapp` attached. The tag names
+One GitHub release per app version, with the `.pkgmerp` attached. The tag names
 the app and the version (`calculator-v1.0.0`), and the notes say what changed
 and the minimum player build. The player does not download anything.
 
@@ -155,7 +173,8 @@ and the minimum player build. The player does not download anything.
 - Device builds live in `morpthis-build`. That workflow checks this repository
   out, builds the pinned MIPS toolchain from the player's `rockboxdev` scripts
   (restored from the Actions cache afterwards), runs the ABI check and packages
-  the `.mapp` files; no repository secret is required.
+  the `.pkgmerp` files; no repository secret is required. Every package is
+  uploaded as its own artifact, and the whole set is also uploaded as one zip.
 - On a tag, `morpthis-build` attaches the packages to the matching GitHub
   release when one exists. The release tag names the app and version, for
   example `calculator-v1.0.0`.
@@ -168,4 +187,5 @@ and the minimum player build. The player does not download anything.
 - Streaming credentials or API keys.
 - A copy of the player's source. The SDK is the interface; the player is a
   separate repository.
-- Build outputs. Releases carry the `.mapp`; the repository carries the source.
+- Build outputs. Releases carry the `.pkgmerp`; the repository carries the
+  source.

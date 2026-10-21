@@ -14,8 +14,8 @@ that `DG_GetKey()` drains.
 
 ## Game data
 
-The repository does not contain a WAD. Copy one of these beside the app binary
-in `Apps/doom/` on the card:
+The repository does not contain a WAD. Copy one of these into the app's data
+folder, `merp_data/doom/` on the card (the package itself is read-only):
 
 - `doom1.wad` — the freely distributable shareware version
 - `doom.wad` or `doom2.wad` — a copy you own
@@ -108,9 +108,10 @@ keys turn for as long as they are held.
 
 ## Saving
 
-Doom writes savegames under `.savegame/` in the app folder. `doomgeneric` is
-built without `ORIGCODE`, so it does not persist `default.cfg`; settings such
-as gamma and screen size reset on each launch. Savegames do survive.
+Doom writes savegames under `.savegame/` in the app's data folder
+(`merp_data/doom/` on the card). `doomgeneric` is built without `ORIGCODE`, so
+it does not persist `default.cfg`; settings such as gamma and screen size reset
+on each launch. Savegames do survive.
 
 ## Sound
 
@@ -177,7 +178,7 @@ or set `DOOMGENERIC_DIR` to an already patched checkout.
 | `i_system.c` | `I_Quit()` tells the host to unload the game; `I_Error()` unwinds to the Doom thread instead of `exit()` |
 | `d_main.c` | The ENDOOM screen does not call `exit(0)` |
 | `i_sound.c` | The port supplies its own sound module instead of SDL_mixer; music stays disabled |
-| `m_config.c` | The default config dir is the app folder, not the player's working directory |
+| `m_config.c` | The default config dir is `DG_GetBaseDir()`, which the port points at the app's data folder |
 | `doomgeneric.c` | `DG_ScreenBuffer` is sized by `sizeof(pixel_t)` so `CMAP256` uses one byte per pixel |
 | `z_zone.c` / `z_zone.h` | `Z_Shutdown()` releases the zone when the plugin is unloaded |
 | `w_wad.c` | A WAD that fails validation is closed before the error unwinds |

@@ -973,8 +973,10 @@ static bool find_wad(char *out, size_t size, char *why, size_t why_size) {
 		}
 
 		char reason[96];
-		if (check_wad(actual, reason, sizeof(reason))) {
-			snprintf(out, size, "%s/%s", folder, actual);
+		char resolved[512];
+		if (check_wad(actual, reason, sizeof(reason)) &&
+			morpthis_fs_resolve(actual, resolved, sizeof(resolved))) {
+			snprintf(out, size, "%s", resolved);
 			snprintf(g_wad_name, sizeof(g_wad_name), "%s", actual);
 			return true;
 		}
@@ -1035,10 +1037,10 @@ int morpthis_app_main(const morpthis_app_t *app) {
 				return 1;
 			}
 		} else {
-			morpthis_logw("doom", "no IWAD in %s", morpthis_fs_app_folder());
+			morpthis_logw("doom", "no IWAD in %s", morpthis_fs_data_folder());
 			if (!show_error_screen("No WAD file was found. Copy the shareware doom1.wad "
-								   "(or your own doom.wad / doom2.wad) into the app "
-								   "folder on the card, then start Doom again.")) {
+								   "(or your own doom.wad / doom2.wad) into "
+								   "merp_data/doom/ on the card, then start Doom again.")) {
 				return 1;
 			}
 		}
@@ -1074,7 +1076,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 		.game_w = g_game_w,
 		.game_h = g_game_h,
 	};
-	if (!dg_port_start(wad, morpthis_fs_app_folder(), &geometry, post_frame, doom_exited)) {
+	if (!dg_port_start(wad, morpthis_fs_data_folder(), &geometry, post_frame, doom_exited)) {
 		morpthis_loge("doom", "could not start the game thread");
 		if (!show_error_screen("Could not start the Doom thread.")) {
 			return 1;
@@ -1086,4 +1088,18 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	morpthis_logi("doom", "running %dx%d landscape at (%d,%d), panel %dx%d", g_game_w,
 				  g_game_h, g_game_x0, g_game_y0, g_panel_w, g_panel_h);
 	return 0;
+}
+
+// The player is unloading us, including when USB mass storage closes the app
+// to share the card. Stop the Doom thread and let its cleanup close the WAD
+// handles and the sound path before the shared object is unmapped. This runs on
+// the GUI thread and must not call morpthis_app_quit().
+MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
+	g_quitting = true;
+
+	if (g_doom_started) {
+		dg_port_request_quit();
+		dg_port_join();
+		g_doom_started = false;
+	}
 }

@@ -1,7 +1,7 @@
 name: build
 
 # Manifest validation and the host build happen here. Device builds — the
-# pinned MIPS toolchain, the ABI check and the .mapp packages — live in
+# pinned MIPS toolchain, the ABI check and the .pkgmerp packages — live in
 # morpthis-build, which checks this repository out for them.
 
 on:
@@ -36,9 +36,11 @@ jobs:
           path: doomgeneric
       - name: Apply the Morpthis Doom port
         run: git -C doomgeneric apply "$GITHUB_WORKSPACE/apps/doom/doomgeneric-morpthis.patch"
+      - name: Install the packaging tool
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends squashfs-tools
       - name: Build and test
         run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" test
-      # Packaging logic only: host-mode .mapp files are not shipped. Device
+      # Packaging logic only: host-mode .pkgmerp files are not shipped. Device
       # packages come from morpthis-build.
       - name: Dry-run the packaging
         run: make MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" package

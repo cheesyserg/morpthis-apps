@@ -2065,3 +2065,35 @@ int morpthis_app_main(const morpthis_app_t *app) {
 
 	return 0;
 }
+
+// The player is unloading us, including when USB mass storage closes the app
+// to share the card. Stop the clock and the mixer while the code that runs
+// them is still mapped. apphost calls this on the GUI thread before destroying
+// the screens, so this must not call morpthis_app_quit().
+MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
+	if (quitting) {
+		// The app's own quit is already winding down. Wait for its worker so
+		// no thread outlives the unload, and leave sound_stop() to it: joining
+		// the same mixer twice is a race the second joiner does not win.
+		if (quit_thread_started) {
+			pthread_join(quit_thread, NULL);
+			quit_thread_started = false;
+		}
+		free_world();
+		return;
+	}
+
+	quitting = true;
+
+	if (active) {
+		active = false;
+		tick_stop();
+		if (best_unsaved) {
+			best_unsaved = false;
+			best_save(best);
+		}
+	}
+
+	sound_stop();
+	free_world();
+}

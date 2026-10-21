@@ -10,7 +10,7 @@ apps/myapp/
   Makefile
 ```
 
-The directory name is the app id and the folder name on the card. Use lowercase
+The directory name is the app id and the package name on the card. Use lowercase
 letters, digits, `.`, `_` and `-`; no spaces.
 
 ## 2. The manifest
@@ -29,10 +29,10 @@ letters, digits, `.`, `_` and `-`; no spaces.
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `id` | no | Defaults to the folder name; must match it. |
+| `id` | no | Defaults to the directory name; must match it. |
 | `name` | no | Defaults to the id. |
 | `version` | no | Semver. Defaults to empty. |
-| `entry` | **yes** | Binary name, relative to the folder. |
+| `entry` | **yes** | Binary name, relative to the package root. |
 | `icon` | no | Relative, square; 64×64 or 128×128. |
 | `description` | no | One line, no trailing period. |
 | `min_player` | no | Non-negative; 0 means no requirement. |
@@ -111,7 +111,11 @@ Rules from the SDK:
 - UI calls run on the GUI thread.
 - Do not allocate in the draw path.
 - Use `morpthis_app_mem_available()` and fail early if the app does not fit.
-- Paths passed to `morpthis_fs_*` stay inside the app folder.
+- Paths passed to `morpthis_fs_*` stay inside the app. Reads see the package and
+  the data folder as one tree; writes go to the data folder.
+- If the app owns threads, a network connection or the raw audio output, export
+  `morpthis_app_shutdown()` to stop them. The player calls it before unloading,
+  including when USB mass-storage mode closes the app to share the card.
 - Log a start line and an exit line.
 
 ## 5. The icon
@@ -141,7 +145,8 @@ make -C apps/myapp MORPTHIS_MODE=host test
 | `quit` | Ends the app |
 
 A missing button fails the test with status 2. `MORPTHIS_RUN_MS` bounds a run
-that does not quit.
+that does not quit. `MORPTHIS_APP_DATA` points the writable folder somewhere
+other than the app folder, which is the default on the host.
 
 ## 7. Validate and package
 
@@ -151,11 +156,19 @@ make package
 ```
 
 The device build needs `mipsel-rockbox-linux-gnu-gcc` from the pinned
-toolchain. `make check-abi` must pass before a release. The package is
-`dist/<id>-<version>.mapp`; extract it to `Apps/<id>/` on the card.
+toolchain, and `mksquashfs` from `squashfs-tools`. `make check-abi` must pass
+before a release. The package is `dist/<id>.pkgmerp`: an uncompressed squashfs
+image with `app.json`, the icon and the entry binary at its root. Copy it to
+`Apps/pkgmerps/<id>.pkgmerp` on the card.
+
+Anything the app writes at runtime belongs in `merp_data/<id>/`, which the SDK
+presents as the same tree: a read falls back from the data folder to the
+package, and a write always lands in the data folder. That way an update can
+replace the package without touching a save or a setting. Doom's WADs are the
+first example: they are copied to `merp_data/doom/`, not into the image.
 
 ## 8. Release
 
-Tag the release `<id>-v<version>` and attach the `.mapp`. The notes say what
+Tag the release `<id>-v<version>` and attach the `.pkgmerp`. The notes say what
 changed and which player build the app was tested on. Do not commit `dist/` or
 `build/`.

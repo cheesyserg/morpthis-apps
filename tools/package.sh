@@ -1,10 +1,19 @@
 #!/bin/sh
-# Builds one app for the device and packs it into a .mapp.
+# Builds one app for the device and packs it into a .pkgmerp.
 #
 #     tools/package.sh apps/calculator [dist]
 #
+# A .pkgmerp is an uncompressed squashfs image with the app folder at its root.
+# The player mounts it read-only through a loop device, so there is no install
+# step and no extracted copy on the card: the file the user copies is the file
+# that runs.
+#
+# Uncompressed is deliberate. The kernel serves the data straight from the card
+# through the page cache, with no decompression workspace; the image is larger,
+# but this player has more card than RAM.
+#
 # The device build needs the pinned cross toolchain, exactly as `make device`
-# does. MORPTHIS_MODE can be overridden for a host-only dry run, but a .mapp
+# does. MORPTHIS_MODE can be overridden for a host-only dry run, but a .pkgmerp
 # should contain the device binary.
 
 set -eu
@@ -22,6 +31,11 @@ mode=${MORPTHIS_MODE:-device}
 if [ ! -f "$app_dir/app.json" ]; then
 	echo "package: $app_dir has no app.json" >&2
 	exit 2
+fi
+
+if ! command -v mksquashfs >/dev/null 2>&1; then
+	echo "package: mksquashfs not found; install squashfs-tools" >&2
+	exit 1
 fi
 
 python3 "$script_dir/validate-manifest.py" "$app_dir"
@@ -61,21 +75,32 @@ if [ ! -f "$stage_dir/$entry" ]; then
 fi
 
 mkdir -p "$out_dir"
-out=$out_dir/$id-$version.mapp
 
-# Zip the contents of the staging folder at the archive root, so the package is
-# exactly Apps/<id>/. Sorted entries keep diffs of two builds stable.
-python3 - "$stage_dir" "$out" <<'PY'
-import os
-import sys
-import zipfile
+# The package name and not the version: the card has exactly one package per
+# app, at Apps/pkgmerps/<id>.pkgmerp, and replacing it is the update. The
+# version stays in app.json, BUILD-INFO and the release tag.
+out=$out_dir/$id.pkgmerp
+rm -f "$out"
 
-stage, out = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
-    for root, dirs, files in os.walk(stage):
-        dirs.sort()
-        for name in sorted(files):
-            path = os.path.join(root, name)
-            archive.write(path, os.path.relpath(path, stage))
-print(f"package: wrote {out}")
-PY
+# -noI -noD -noF -noX stores the inode table, data blocks, fragments and xattrs
+# without compression, which is what keeps the kernel from decompressing on the
+# way to the page cache. -comp gzip names the metadata compressor the device's
+# squashfs 4.0 driver is guaranteed to know. -all-root makes every entry
+# root-owned, as the player runs; the mode bits the build set are kept.
+if ! mksquashfs "$stage_dir" "$out" \
+	-noappend -noI -noD -noF -noX -comp gzip -all-root; then
+	echo "package: mksquashfs failed for $id" >&2
+	rm -f "$out"
+	exit 1
+fi
+
+# Cheap proof that the image has a superblock the kernel will accept.
+if command -v unsquashfs >/dev/null 2>&1; then
+	if ! unsquashfs -s "$out" >/dev/null 2>&1; then
+		echo "package: $out is not a readable squashfs image" >&2
+		rm -f "$out"
+		exit 1
+	fi
+fi
+
+echo "package: wrote $out"
