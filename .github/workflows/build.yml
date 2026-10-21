@@ -1,0 +1,79 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate app.json
+        run: python3 tools/validate-manifest.py --all apps
+
+  host:
+    name: Host build and smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/morpthis-sdk
+          path: sdk
+      - name: Build and test
+        run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" test
+
+  # The device job needs the pinned toolchain tarball. Put its URL in the
+  # MORPTHIS_TOOLCHAIN_URL repository secret (the SDK publishes the tarball);
+  # until then, run this job manually only when the secret exists.
+  device:
+    name: Device build, ABI check and packages
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/morpthis-sdk
+          path: sdk
+      - name: Fetch the pinned toolchain
+        env:
+          MORPTHIS_TOOLCHAIN_URL: ${{ secrets.MORPTHIS_TOOLCHAIN_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MORPTHIS_TOOLCHAIN_URL:-}" ]; then
+            echo "::error::MORPTHIS_TOOLCHAIN_URL is not set; attach a toolchain tarball first."
+            exit 1
+          fi
+          sh sdk/toolchain/fetch.sh "$RUNNER_TEMP/morpthis-toolchain"
+          echo "$RUNNER_TEMP/morpthis-toolchain/bin" >> "$GITHUB_PATH"
+      - name: Build, check and package
+        run: |
+          make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" check-abi
+          make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" package
+      - name: Upload the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: morpthis-apps-${{ github.sha }}
+          path: dist/*.mapp
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach packages to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::No release named $GITHUB_REF_NAME; packages are in the artifact."
+            exit 0
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.mapp --clobber

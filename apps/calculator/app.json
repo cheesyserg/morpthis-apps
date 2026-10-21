@@ -1,0 +1,10 @@
+{
+  "id": "calculator",
+  "name": "Calculator",
+  "version": "1.0.0",
+  "entry": "calculator",
+  "icon": "icon.png",
+  "description": "A four-function calculator",
+  "tier": "light",
+  "min_player": 1
+}

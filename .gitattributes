@@ -1,0 +1,10 @@
+* text=auto
+
+# Make and the shell do not tolerate CRLF. Pin these to LF in the repository so
+# a Windows checkout still produces scripts WSL can run.
+*.sh text eol=lf
+*.mk text eol=lf
+Makefile text eol=lf
+*.cmake text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf

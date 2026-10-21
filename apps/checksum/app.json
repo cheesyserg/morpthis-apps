@@ -1,0 +1,8 @@
+{
+  "id": "checksum",
+  "name": "Checksum",
+  "version": "1.0.0",
+  "entry": "checksum",
+  "description": "Prints a CRC32 checksum for the files in its folder",
+  "min_player": 1
+}
