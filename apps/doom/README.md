@@ -54,8 +54,33 @@ readable underneath.
 | `OK` | Enter: selects a menu item, and answers yes to Doom's prompts |
 | `X` | Leave the app |
 
-In Doom's menu, `MENU` opens it, the D-pad moves, `OK` selects.
-**Quit Game** asks `y/n`; `OK` sends `y` first, so it confirms.
+In a menu, the D-pad navigates, `MENU` closes the menu, and `FIRE`/`PREV`
+acts as OK. `USE`/`PLAY/PAUSE` goes back one level. The volume keys also move
+up and down the current menu. **Quit Game** asks `y/n`; the OK action sends `y`
+first, so it confirms.
+
+### Save names
+
+When Doom asks for a save name, the controls become a small T9-style editor:
+
+- Volume up/down cycles through `SPACE`, `A-Z`, `0-9`, `-` and `.`. Stop on a
+  letter for a moment and it is typed automatically; `FIRE`/`PREV` types it at
+  once.
+- `PLAY/PAUSE` deletes the previous character.
+- `NEXT` or `OK` finishes the name and saves.
+- `POWER` cancels the name and returns to the menu.
+
+### Volume menu
+
+Doom's Options -> Sound Volume page now shows three percentages instead of
+sliders:
+
+- `MASTER` is the player's own volume.
+- `GAME` is Doom's sound-effect volume.
+- `MUSIC` is Doom's music volume. Music is not implemented yet, but the setting
+  is kept for when it is.
+
+Select a row with the up/down keys and change it with left/right.
 
 The physical keys use the same landscape idea:
 

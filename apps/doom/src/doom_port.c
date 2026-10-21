@@ -16,6 +16,7 @@
 #include <time.h>
 
 #include <morpthis/app.h>
+#include <morpthis/audio.h>
 #include <morpthis/log.h>
 
 #include "doomgeneric.h"
@@ -25,6 +26,7 @@
 #include "i_system.h"
 #include "i_video.h"
 #include "m_controls.h"
+#include "m_menu.h"
 #include "w_file.h"
 #include "w_wad.h"
 #include "z_zone.h"
@@ -242,6 +244,8 @@ static pthread_t g_thread;
 static bool g_thread_started;
 static volatile bool g_quit;
 static volatile bool g_gameplay;
+static volatile bool g_menu;
+static volatile bool g_save_input;
 
 static char *g_wad_path;
 static char *g_base_dir;
@@ -325,6 +329,8 @@ static void *doom_thread_main(void *unused) {
 			// intermission, the title screen, demos and menus get the rocker back.
 			g_gameplay = gamestate == GS_LEVEL && !paused && !menuactive &&
 						 !demoplayback && !advancedemo;
+			g_menu = menuactive;
+			g_save_input = M_SaveStringActive();
 		}
 
 		// A quit requested by the host (BACK, the X control) ends the loop
@@ -425,6 +431,8 @@ bool dg_port_start(const char *wad_path, const char *base_dir, const dg_geometry
 	g_exit_cb = exited;
 	g_quit = false;
 	g_gameplay = false;
+	g_menu = false;
+	g_save_input = false;
 	g_cleanup_done = false;
 	g_exit_funcs_ran = false;
 	g_error[0] = '\0';
@@ -493,6 +501,28 @@ bool dg_port_running(void) {
 
 bool dg_port_gameplay_active(void) {
 	return g_gameplay;
+}
+
+bool dg_port_menu_active(void) {
+	return g_menu;
+}
+
+bool dg_port_save_input_active(void) {
+	return g_save_input;
+}
+
+int dg_port_master_volume(void) {
+	return morpthis_audio_volume();
+}
+
+void dg_port_set_master_volume(int percent) {
+	if (percent < 0) {
+		percent = 0;
+	} else if (percent > 100) {
+		percent = 100;
+	}
+	morpthis_logd("doom", "master volume %d%%", percent);
+	morpthis_audio_set_volume(percent);
 }
 
 bool dg_port_take_error(char *buffer, size_t size) {

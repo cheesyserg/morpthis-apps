@@ -161,6 +161,146 @@
      music_module = &DG_music_module;
  #endif /* FEATURE_SOUND */
  }
+--- a/doomgeneric/m_menu.c
++++ b/doomgeneric/m_menu.c
+@@ -58,6 +58,10 @@
+
+ #include "m_menu.h"
+
++#ifdef MORPTHIS_PORT
++#include "doom_port.h"
++#endif
++
+
+ extern patch_t*		hu_font[HU_FONTSIZE];
+ extern boolean		message_dontfuckwithme;
+@@ -186,6 +190,7 @@ void M_QuitDOOM(int choice);
+
+ void M_ChangeMessages(int choice);
+ void M_ChangeSensitivity(int choice);
++void M_MasterVol(int choice);
+ void M_SfxVol(int choice);
+ void M_MusicVol(int choice);
+ void M_ChangeDetail(int choice);
+@@ -413,19 +418,32 @@ menu_t  ReadDef2 =
+ //
+ enum
+ {
++#ifdef MORPTHIS_PORT
++    master_vol,
++#endif
+     sfx_vol,
++#ifndef MORPTHIS_PORT
+     sfx_empty1,
++#endif
+     music_vol,
++#ifndef MORPTHIS_PORT
+     sfx_empty2,
++#endif
+     sound_end
+ } sound_e;
+
+ menuitem_t SoundMenu[]=
+ {
++#ifdef MORPTHIS_PORT
++    {2,"",M_MasterVol,'v'},
++    {2,"",M_SfxVol,'s'},
++    {2,"",M_MusicVol,'m'}
++#else
+     {2,"M_SFXVOL",M_SfxVol,'s'},
+     {-1,"",0,'\0'},
+     {2,"M_MUSVOL",M_MusicVol,'m'},
+     {-1,"",0,'\0'}
++#endif
+ };
+
+ menu_t  SoundDef =
+@@ -831,15 +849,37 @@ void M_DrawReadThis2(void)
+ //
+ // Change Sfx & Music volumes
+ //
++#ifdef MORPTHIS_PORT
++static void M_DrawVolumeRow(int row, const char *label, int percent)
++{
++    char value[8];
++
++    if (percent < 0)
++	percent = 0;
++    if (percent > 100)
++	percent = 100;
++
++    M_snprintf(value, sizeof(value), "%d%%", percent);
++    M_WriteText(SoundDef.x, SoundDef.y + LINEHEIGHT * row, label);
++    M_WriteText(SoundDef.x + 120, SoundDef.y + LINEHEIGHT * row, value);
++}
++#endif
++
+ void M_DrawSound(void)
+ {
+     V_DrawPatchDirect (60, 38, W_CacheLumpName(DEH_String("M_SVOL"), PU_CACHE));
+
++#ifdef MORPTHIS_PORT
++    M_DrawVolumeRow(master_vol, "MASTER", dg_port_master_volume());
++    M_DrawVolumeRow(sfx_vol, "GAME", (sfxVolume * 100) / 15);
++    M_DrawVolumeRow(music_vol, "MUSIC", (musicVolume * 100) / 15);
++#else
+     M_DrawThermo(SoundDef.x,SoundDef.y+LINEHEIGHT*(sfx_vol+1),
+ 		 16,sfxVolume);
+
+     M_DrawThermo(SoundDef.x,SoundDef.y+LINEHEIGHT*(music_vol+1),
+ 		 16,musicVolume);
++#endif
+ }
+
+ void M_Sound(int choice)
+@@ -847,6 +887,25 @@ void M_Sound(int choice)
+     M_SetupNextMenu(&SoundDef);
+ }
+
++#ifdef MORPTHIS_PORT
++void M_MasterVol(int choice)
++{
++    int volume = dg_port_master_volume();
++
++    if (choice == 0)
++	volume -= 5;
++    else
++	volume += 5;
++
++    if (volume < 0)
++	volume = 0;
++    else if (volume > 100)
++	volume = 100;
++
++    dg_port_set_master_volume(volume);
++}
++#endif
++
+ void M_SfxVol(int choice)
+ {
+     switch(choice)
+@@ -2123,3 +2182,8 @@ void M_Init (void)
+     //opldev = M_CheckParm("-opldev") > 0;
+ }
+
++
++boolean M_SaveStringActive(void)
++{
++    return saveStringEnter != 0;
++}
+--- a/doomgeneric/m_menu.h
++++ b/doomgeneric/m_menu.h
+@@ -51,6 +51,10 @@ void M_Init (void);
+ // does nothing if menu is already up.
+ void M_StartControlPanel (void);
+
++// True while the Save Game menu is asking for a name. Used by the port to
++// offer a text-entry keyboard and to capture the volume keys.
++boolean M_SaveStringActive(void);
++
+
+
+ extern int detailLevel;
 --- a/doomgeneric/w_wad.c
 +++ b/doomgeneric/w_wad.c
 @@ -189,6 +189,11 @@

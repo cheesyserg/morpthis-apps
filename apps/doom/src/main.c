@@ -37,6 +37,12 @@ MORPTHIS_DEFINE_API_VERSION();
 #define ALPHA_ARROW 190
 #define ALPHA_TEXT 230
 
+// Save-name entry. The volume rocker cycles this list; a pause after choosing
+// a letter types it (the T9-style timeout), and FIRE types it at once.
+#define SAVE_T9_MS 900
+#define SAVE_DEFAULT_INDEX 1 // 'A' (index 0 is the space)
+static const char g_save_chars[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.";
+
 static morpthis_screen_t *g_screen;
 static morpthis_widget_t *g_canvas;
 static uint16_t *g_pixels;
@@ -76,6 +82,11 @@ static int g_x_r;
 static bool g_doom_started;
 static bool g_quitting;
 static bool g_gameplay_keys;
+static bool g_menu_active;
+static bool g_save_input;
+static int g_save_char_index = SAVE_DEFAULT_INDEX;
+static bool g_save_char_dirty;
+static uint32_t g_save_char_deadline;
 static char g_wad_name[32];
 
 // ---------------------------------------------------------------------------
@@ -89,20 +100,43 @@ typedef struct {
 
 static const glyph_t g_font[] = {
 	{'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+	{'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+	{'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
 	{'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
 	{'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
 	{'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
 	{'G', {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}},
+	{'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
 	{'I', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F}},
+	{'J', {0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E}},
 	{'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
 	{'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
 	{'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
 	{'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
 	{'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+	{'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+	{'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
 	{'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
 	{'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+	{'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
 	{'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+	{'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+	{'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}},
 	{'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
+	{'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}},
+	{'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
+	{'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+	{'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+	{'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+	{'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+	{'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+	{'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+	{'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+	{'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+	{'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+	{'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+	{'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+	{'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
 };
 
 static const glyph_t *glyph_for(char ch) {
@@ -241,7 +275,39 @@ static void draw_button(int cx, int cy, int r, const char *label, uint16_t fill,
 	draw_text_centered(cx, cy, label, COLOR_TEXT, ALPHA_TEXT, g_scale);
 }
 
+static void draw_save_entry(void) {
+	int s = g_scale;
+	int x = 4 * s;
+	int y = g_ui_h - 44 * s;
+	int w = g_ui_w - 8 * s;
+	int h = 40 * s;
+
+	fill_rect(x, y, w, h, COLOR_RING, ALPHA_RING);
+	fill_rect(x + 2 * s, y + 2 * s, w - 4 * s, h - 4 * s, COLOR_BUTTON, ALPHA_FILL);
+
+	draw_text(x + 8 * s, y + 4 * s,
+			   g_save_char_dirty ? "SAVE NAME AUTO" : "SAVE NAME", COLOR_TEXT,
+			   ALPHA_TEXT, s);
+
+	char current = g_save_chars[g_save_char_index];
+	if (current == ' ') {
+		draw_text(x + 8 * s, y + 12 * s, "SPACE", COLOR_TEXT, ALPHA_TEXT, 2 * s);
+	} else {
+		char text[2] = {current, '\0'};
+		draw_text(x + 8 * s, y + 12 * s, text, COLOR_TEXT, ALPHA_TEXT, 3 * s);
+	}
+
+	draw_text(x + 80 * s, y + 13 * s, "VOL UP DN LETTER", COLOR_TEXT, ALPHA_TEXT, s);
+	draw_text(x + 80 * s, y + 22 * s, "FIRE TYPE", COLOR_TEXT, ALPHA_TEXT, s);
+	draw_text(x + 80 * s, y + 31 * s, "PLAY DEL  NEXT DONE", COLOR_TEXT, ALPHA_TEXT, s);
+}
+
 static void draw_overlay(void) {
+	if (g_save_input) {
+		draw_save_entry();
+		return;
+	}
+
 	// Movement, bottom-left.
 	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r, COLOR_RING, ALPHA_RING);
 	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r - 2 * g_scale, COLOR_BUTTON, ALPHA_FILL);
@@ -250,8 +316,10 @@ static void draw_overlay(void) {
 	}
 
 	// Actions, bottom-right.
-	draw_button(g_fire_cx, g_fire_cy, g_fire_r, "FIRE", COLOR_FIRE, COLOR_FIRE_RING);
-	draw_button(g_use_cx, g_use_cy, g_use_r, "USE", COLOR_BUTTON, COLOR_RING);
+	draw_button(g_fire_cx, g_fire_cy, g_fire_r, g_menu_active ? "OK" : "FIRE",
+				COLOR_FIRE, COLOR_FIRE_RING);
+	draw_button(g_use_cx, g_use_cy, g_use_r, g_menu_active ? "BACK" : "USE",
+				COLOR_BUTTON, COLOR_RING);
 	draw_button(g_run_cx, g_run_cy, g_run_r, "RUN", COLOR_BUTTON, COLOR_RING);
 
 	// Menu and confirm, top-right; leave, top-left.
@@ -349,8 +417,107 @@ static bool g_dir_left;
 static bool g_dir_right;
 static bool g_dir_up;
 static bool g_dir_down;
+static unsigned char g_dpad_left_key = KEY_STRAFE_L;
+static unsigned char g_dpad_right_key = KEY_STRAFE_R;
+static unsigned char g_dpad_up_key = KEY_UPARROW;
+static unsigned char g_dpad_down_key = KEY_DOWNARROW;
 
 static void request_quit(void);
+
+// ---------------------------------------------------------------------------
+// save-name entry
+// ---------------------------------------------------------------------------
+
+static void save_reset_letter(void) {
+	g_save_char_index = SAVE_DEFAULT_INDEX;
+	g_save_char_dirty = false;
+	g_save_char_deadline = 0;
+}
+
+static void save_cycle_letter(int direction) {
+	int count = (int)sizeof(g_save_chars) - 1;
+	g_save_char_index = (g_save_char_index + direction + count) % count;
+	g_save_char_dirty = true;
+	g_save_char_deadline = morpthis_app_time_ms() + SAVE_T9_MS;
+}
+
+static void save_type_current(void) {
+	unsigned char ch = (unsigned char)g_save_chars[g_save_char_index];
+	dg_port_pulse_key(ch, 120);
+	save_reset_letter();
+}
+
+static void save_backspace(void) {
+	dg_port_pulse_key(KEY_BACKSPACE, 100);
+	save_reset_letter();
+}
+
+static void save_finish(void) {
+	if (g_save_char_dirty) {
+		save_type_current();
+	}
+	dg_port_pulse_key(KEY_ENTER, 120);
+	save_reset_letter();
+}
+
+static void menu_confirm(void) {
+	// 'y' answers Doom's yes/no prompts; Enter activates the selected item.
+	dg_port_pulse_key('y', 100);
+	dg_port_pulse_key(KEY_ENTER, 100);
+}
+
+static void save_tick(void) {
+	if (!g_save_input) {
+		save_reset_letter();
+		return;
+	}
+	if (g_save_char_dirty &&
+		(int32_t)(morpthis_app_time_ms() - g_save_char_deadline) >= 0) {
+		save_type_current();
+	}
+}
+
+static void fire_action(void) {
+	if (g_save_input) {
+		save_type_current();
+	} else if (g_menu_active) {
+		menu_confirm();
+	} else {
+		dg_port_pulse_key(KEY_FIRE, 150);
+	}
+}
+
+static void use_action(void) {
+	if (g_save_input) {
+		save_backspace();
+	} else if (g_menu_active) {
+		// Back one menu level.
+		dg_port_pulse_key(KEY_BACKSPACE, 120);
+	} else {
+		dg_port_pulse_key(KEY_USE, 150);
+	}
+}
+
+static void next_action(void) {
+	if (g_save_input) {
+		save_finish();
+	} else {
+		dg_port_pulse_key(']', 120);
+	}
+}
+
+static void volume_action(bool up) {
+	if (g_save_input) {
+		save_cycle_letter(up ? 1 : -1);
+	} else if (g_menu_active) {
+		// Short enough that two quick rocker presses are two menu steps, not
+		// one coalesced key hold.
+		dg_port_pulse_key(up ? KEY_UPARROW : KEY_DOWNARROW, 60);
+	} else {
+		// Camera turn during play: volume up turns right.
+		dg_port_pulse_key(up ? KEY_RIGHTARROW : KEY_LEFTARROW, 150);
+	}
+}
 
 static void set_dir(bool *state, bool want, unsigned char key) {
 	if (*state == want) {
@@ -365,19 +532,19 @@ static void update_dpad(int x, int y) {
 	int dy = y - g_dpad_cy;
 	int dead = g_dpad_r / 4;
 
-	set_dir(&g_dir_left, dx < -dead, KEY_STRAFE_L);
-	set_dir(&g_dir_right, dx > dead, KEY_STRAFE_R);
-	set_dir(&g_dir_up, dy < -dead, KEY_UPARROW);
-	set_dir(&g_dir_down, dy > dead, KEY_DOWNARROW);
+	set_dir(&g_dir_left, dx < -dead, g_dpad_left_key);
+	set_dir(&g_dir_right, dx > dead, g_dpad_right_key);
+	set_dir(&g_dir_up, dy < -dead, g_dpad_up_key);
+	set_dir(&g_dir_down, dy > dead, g_dpad_down_key);
 }
 
 static void release_owner(void) {
 	switch (g_owner) {
 	case OWN_DPAD:
-		set_dir(&g_dir_left, false, KEY_STRAFE_L);
-		set_dir(&g_dir_right, false, KEY_STRAFE_R);
-		set_dir(&g_dir_up, false, KEY_UPARROW);
-		set_dir(&g_dir_down, false, KEY_DOWNARROW);
+		set_dir(&g_dir_left, false, g_dpad_left_key);
+		set_dir(&g_dir_right, false, g_dpad_right_key);
+		set_dir(&g_dir_up, false, g_dpad_up_key);
+		set_dir(&g_dir_down, false, g_dpad_down_key);
 		break;
 	case OWN_FIRE:
 	case OWN_VIEW:
@@ -411,34 +578,50 @@ static void touch_down(int lx, int ly) {
 		return;
 	}
 	if (in_circle(lx, ly, g_ok_cx, g_ok_cy, g_ok_r + slop)) {
-		// Confirm, including Doom's y/n prompts.
-		dg_port_pulse_key('y', 100);
-		dg_port_pulse_key(KEY_ENTER, 100);
+		if (g_save_input) {
+			save_finish();
+		} else {
+			menu_confirm();
+		}
 		return;
 	}
 	if (in_circle(lx, ly, g_use_cx, g_use_cy, g_use_r + slop)) {
+		if (g_save_input) {
+			save_backspace();
+			return;
+		}
 		dg_port_push_key(true, KEY_USE);
 		g_owner = OWN_USE;
 		return;
 	}
 	if (in_circle(lx, ly, g_run_cx, g_run_cy, g_run_r + slop)) {
+		if (g_save_input) {
+			dg_port_pulse_key(' ', 100);
+			return;
+		}
 		dg_port_push_key(true, KEY_RSHIFT);
 		g_owner = OWN_RUN;
 		return;
 	}
 	if (in_circle(lx, ly, g_fire_cx, g_fire_cy, g_fire_r + slop)) {
+		if (g_save_input || g_menu_active) {
+			fire_action();
+			return;
+		}
 		dg_port_push_key(true, KEY_FIRE);
 		g_owner = OWN_FIRE;
 		return;
 	}
 	if (in_circle(lx, ly, g_dpad_cx, g_dpad_cy, g_dpad_r + slop)) {
+		g_dpad_left_key = g_menu_active ? KEY_LEFTARROW : KEY_STRAFE_L;
+		g_dpad_right_key = g_menu_active ? KEY_RIGHTARROW : KEY_STRAFE_R;
 		g_owner = OWN_DPAD;
 		update_dpad(lx, ly);
 		return;
 	}
 
-	if (lx >= g_game_x0 && lx < g_game_x0 + g_game_w && ly >= g_game_y0 &&
-		ly < g_game_y0 + g_game_h) {
+	if (!g_menu_active && lx >= g_game_x0 && lx < g_game_x0 + g_game_w &&
+		ly >= g_game_y0 && ly < g_game_y0 + g_game_h) {
 		// A tap on the picture fires, so the title screen and demos can be
 		// dismissed without reaching for a button.
 		dg_port_push_key(true, KEY_FIRE);
@@ -478,24 +661,21 @@ static void button_cb(morpthis_button_t button, morpthis_input_action_t action, 
 
 	switch (button) {
 	case MORPTHIS_BUTTON_PLAY_PAUSE:
-		// Use. One press is enough; this key is not repeated during play.
-		dg_port_pulse_key(KEY_USE, 150);
+		use_action();
 		break;
 	case MORPTHIS_BUTTON_NEXT:
-		dg_port_pulse_key(']', 120);
+		next_action();
 		break;
 	case MORPTHIS_BUTTON_PREV:
-		// Fire. The player repeats this key while it is held during active
-		// play, and each repeat extends the same hold.
-		dg_port_pulse_key(KEY_FIRE, 150);
+		// Fire during play, OK in Doom's menus, and the selected character
+		// while typing a save name.
+		fire_action();
 		break;
 	case MORPTHIS_BUTTON_VOLUME_UP:
-		// Camera turn. Longer than the player's repeat period, so repeated
-		// presses extend the same hold and a held key turns continuously.
-		dg_port_pulse_key(KEY_RIGHTARROW, 150);
+		volume_action(true);
 		break;
 	case MORPTHIS_BUTTON_VOLUME_DOWN:
-		dg_port_pulse_key(KEY_LEFTARROW, 150);
+		volume_action(false);
 		break;
 	case MORPTHIS_BUTTON_POWER:
 		dg_port_pulse_key(KEY_ESCAPE, 120);
@@ -520,6 +700,19 @@ static void frame_posted(void *unused) {
 
 	dg_frame_result_t result = dg_port_copy_frame(g_pixels, g_panel_w);
 	if (result & DG_FRAME_COPIED) {
+		bool save = dg_port_save_input_active();
+		bool menu = dg_port_menu_active() || save;
+		if (menu != g_menu_active) {
+			g_menu_active = menu;
+			morpthis_logd("doom", "menu controls %s", menu ? "on" : "off");
+			morpthis_input_set_game_menu(menu);
+		}
+		if (save != g_save_input) {
+			g_save_input = save;
+			save_reset_letter();
+		}
+		save_tick();
+
 		bool gameplay = dg_port_gameplay_active();
 		if (gameplay != g_gameplay_keys) {
 			g_gameplay_keys = gameplay;
@@ -588,7 +781,11 @@ static void on_doom_exited(void *unused) {
 	dg_port_join();
 	g_doom_started = false;
 	g_gameplay_keys = false;
+	g_menu_active = false;
+	g_save_input = false;
+	save_reset_letter();
 	morpthis_input_set_gameplay(false);
+	morpthis_input_set_game_menu(false);
 
 	char error[512];
 	if (!g_quitting && dg_port_take_error(error, sizeof(error))) {

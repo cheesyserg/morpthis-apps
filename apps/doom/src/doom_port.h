@@ -61,6 +61,17 @@ bool dg_port_running(void);
 // controls only during play and go back to the player's volume otherwise.
 bool dg_port_gameplay_active(void);
 
+// True while Doom's menu is on screen, and specifically while it is asking for
+// a save name. The app uses these for contextual key mapping and the on-screen
+// text-entry panel.
+bool dg_port_menu_active(void);
+bool dg_port_save_input_active(void);
+
+// The player's master volume, as a percentage. These come from the SDK and are
+// used by the game's volume menu.
+int dg_port_master_volume(void);
+void dg_port_set_master_volume(int percent);
+
 // Copies the newest completed frame into `dst`, whose stride is `stride`
 // pixels. The frame is already in the canvas's portrait orientation. GUI
 // thread only.
