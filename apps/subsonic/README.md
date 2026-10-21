@@ -56,7 +56,7 @@ changed it over ADB while the app was running.
 | `server` | Base URL, with any reverse-proxy prefix. `http://` or `https://`; a pasted `/rest` suffix is removed. |
 | `username`, `password` | The Subsonic account. The password is stored in plain text on the card; use a dedicated account. |
 | `format` | `mp3` (default), `flac` (server transcodes to lossless FLAC) or `raw` (the original file; only FLAC and MP3 originals are decoded). Use `raw` when the server's FLAC transcoder is set to 16 bits and the library has 24-bit files. |
-| `max_bitrate` | 64–320 kbps, used only when `format` is `mp3`. The **Quality** button cycles 256 → 320 → FLAC. |
+| `max_bitrate` | 64–320 kbps, used only when `format` is `mp3`. The **Quality** button cycles 256 → 320 → FLAC → original (no transcoding). |
 | `tls_verify` | `strict` (default) or `relaxed`. Relaxed accepts a self-signed certificate or an unknown issuer, but still checks the name and the dates. |
 | `ca_bundle` | Optional absolute path to a PEM bundle. `<card>/.local/cacert.pem` and `/etc/ssl/cert.pem` are checked when this is empty. |
 
@@ -73,16 +73,15 @@ The quickest route to a working server:
 The first screen is a menu: **Artists**, **Albums**, **Folders**, **Playlists**,
 **Genres**, **Starred**, **Random**, **Newest** and **Search**. Tapping an artist
 shows albums, an album shows its tracks, and a track starts playing. The bottom
-row is **Up**, **Stop** and **More**.
+row is **Stop** and **More**; the player's chevron goes up one level.
 
 | Control | Action |
 | --- | --- |
-| **Up** | Goes back one level; at a menu it says so. |
 | **Stop** | Stops playback; the queue is kept. |
 | **More** | Opens the menu: **Queue**, **Star current**, **Settings**, **Back**. |
 | PLAY/PAUSE | Pauses and resumes the current stream. |
 | NEXT / PREV | Moves through the play queue, not the list on screen. |
-| BACK | Goes back one app screen; on the main screen it leaves the app, or keeps it playing in the background when a track is loaded. |
+| BACK | Goes up one level in the library. At the root it leaves the app, or keeps it playing in the background when a track is loaded. |
 | Volume | Still the player's volume, not the app's. |
 
 Tapping a track queues every track in the list being looked at, starting with
@@ -93,9 +92,12 @@ means; the queue survives until another track is tapped or **Queue → Clear**.
 songs, then albums, then artists. **Star current** stars or unstars the track
 that is playing; starred tracks are marked with a leading `*` in lists.
 
-The settings screen has **TLS: strict/relaxed**, **Quality: 256/320 kbps or
-FLAC**, **Reload settings** and **Back**. The first two write `settings.json`;
-they do not restart the current track, so the next stream uses the new setting.
+The settings screen has **TLS: strict/relaxed**, **Quality: 256/320 kbps, FLAC
+or original**, **Reload settings** and **Back**. The first two write
+`settings.json`; they do not restart the current track, so the next stream uses
+the new setting. **Original** asks the server for the file itself, with no
+transcoding; it plays MP3 and FLAC originals and reports a clear error for any
+other codec.
 
 When a track ends, the app plays the next track in the queue. The start and the
 end of a listen of at least thirty seconds are reported to the server with
@@ -106,12 +108,16 @@ end of a listen of at least thirty seconds are reported to the server with
 This is a working client with a deliberately small footprint, not a complete
 Subsonic replacement:
 
-- MP3 and FLAC. Opus is not decoded; choose MP3 or FLAC on the server. Hi-res
-  is whatever the server sends: a 24-bit FLAC is played at 32-bit output, but a
-  transcoder configured for 16-bit FLAC will send 16 bits.
+- MP3 and FLAC. Opus is not decoded; choose MP3 or FLAC on the server. With
+  **Original** (no transcoding), an Opus, AAC/M4A, Ogg, WAV or other original
+  file is refused when it is tapped, with an error naming the format; choose
+  MP3 or FLAC transcoding for those. Hi-res is whatever the server sends: a
+  24-bit FLAC is played at 32-bit output, but a transcoder configured for
+  16-bit FLAC will send 16 bits.
 - The first 200 entries of each view. There is no "load more" row yet.
 - No cover art, seeking or gapless playback. Playlists can be browsed and
-  played, but not created or edited from the device.
+  played, but not created or edited from the device. Rows follow the player's
+  library layout (title, artist/detail, chevron) but not its artwork.
 - One stream at a time. Starting another track stops the first.
 - No look-ahead buffer: the decoder reads from the socket directly. A link
   that stalls can leave an audible gap. The player's built-in client used two

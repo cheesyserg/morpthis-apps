@@ -243,7 +243,9 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			if (!aborted(generation)) {
 				post_event(generation, STREAM_EVENT_FAILED,
 						   source.io_error ? "The stream ended before any audio arrived."
-										  : "The server did not send a FLAC stream. Enable FLAC transcoding on it.",
+										  : (track->format == SUBSONIC_FORMAT_RAW
+												 ? "Original quality: the server did not send a FLAC file this app can read. Choose MP3 or FLAC transcoding."
+												 : "The server did not send a FLAC stream. Enable FLAC transcoding on it."),
 						   track);
 			}
 			goto done;
@@ -263,7 +265,9 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			if (!aborted(generation)) {
 				post_event(generation, STREAM_EVENT_FAILED,
 						   source.io_error ? "The stream ended before any audio arrived."
-										  : "The server did not send an MP3 stream. Enable MP3 transcoding on it.",
+										  : (track->format == SUBSONIC_FORMAT_RAW
+												 ? "Original quality: the server did not send an MP3 file this app can read. Choose MP3 or FLAC transcoding."
+												 : "The server did not send an MP3 stream. Enable MP3 transcoding on it."),
 						   track);
 			}
 			goto done;

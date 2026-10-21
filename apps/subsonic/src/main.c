@@ -141,16 +141,45 @@ static void clip(char *out, size_t size, const char *text, size_t limit) {
 }
 
 static void set_status(const char *first, const char *second) {
-	char a[72], b[72], text[148];
+	char a[80], b[80], text[168];
 	clip(a, sizeof(a), first, 64);
 	clip(b, sizeof(b), second, 64);
 	if (b[0]) {
-		snprintf(text, sizeof(text), "%s\n%s", a, b);
+		snprintf(text, sizeof(text), "%s %s", a, b);
 	} else {
 		snprintf(text, sizeof(text), "%s", a);
 	}
 	if (g_status) {
 		morpthis_widget_set_text(g_status, text);
+	}
+}
+
+static const char *entry_noun(void) {
+	if (g_entry_count <= 0) {
+		return "items";
+	}
+	subsonic_entry_kind_t kind = g_entries[0].kind;
+	for (int i = 1; i < g_entry_count; i++) {
+		if (g_entries[i].kind != kind) {
+			return "items";
+		}
+	}
+	switch (kind) {
+	case SUBSONIC_TRACK:
+		return "tracks";
+	case SUBSONIC_ALBUM:
+		return "albums";
+	case SUBSONIC_ARTIST:
+		return "artists";
+	case SUBSONIC_PLAYLIST:
+		return "playlists";
+	case SUBSONIC_GENRE:
+		return "genres";
+	case SUBSONIC_DIRECTORY:
+	case SUBSONIC_MUSIC_FOLDER:
+		return "folders";
+	default:
+		return "items";
 	}
 }
 
@@ -167,8 +196,12 @@ static void refresh_status(void) {
 		set_status("Loading...", current_view_title());
 	} else if (!g_settings.configured) {
 		set_status("Not configured.", "Tap More for settings.");
+	} else if (g_depth > 0 && g_entry_count > 0) {
+		char count[32];
+		snprintf(count, sizeof(count), "%d %s", g_entry_count, entry_noun());
+		set_status(count, NULL);
 	} else {
-		set_status("Ready", current_view_title());
+		set_status("Choose a section.", NULL);
 	}
 }
 
@@ -193,12 +226,35 @@ static void request_view(void) {
 	g_browsing = true;
 	g_have_error = false;
 	g_entry_count = 0;
+	morpthis_screen_set_title(g_main_screen, current_view_title());
 	morpthis_list_clear(g_list);
 	refresh_status();
 	browse_worker_request((int)g_view_generation, view->kind, view->id, 0);
 }
 
-static void format_entry(const subsonic_entry_t *entry, char *out, size_t size);
+// The row the accent bar belongs to: the playing track, if it is in the list
+// on screen. The queue keeps the authoritative id, so this survives a rebuild.
+static int playing_row_index(void) {
+	if ((!g_playing && !g_paused) || g_queue_index < 0 || g_queue_index >= g_queue_count) {
+		return -1;
+	}
+	const char *id = g_queue[g_queue_index].id;
+	for (int i = 0; i < g_entry_count; i++) {
+		if (g_entries[i].kind == SUBSONIC_TRACK && strcmp(g_entries[i].id, id) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void update_playing_mark(void) {
+	if (g_list) {
+		morpthis_list_set_playing(g_list, playing_row_index());
+	}
+	if (g_queue_list) {
+		morpthis_list_set_playing(g_queue_list, (!g_playing && !g_paused) ? -1 : g_queue_index);
+	}
+}
 
 static void render_entries(void) {
 	if (!g_list) {
@@ -206,10 +262,23 @@ static void render_entries(void) {
 	}
 	morpthis_list_clear(g_list);
 	for (int i = 0; i < g_entry_count; i++) {
-		char text[384];
-		format_entry(&g_entries[i], text, sizeof(text));
-		morpthis_list_add(g_list, text);
+		const subsonic_entry_t *entry = &g_entries[i];
+		char title[220];
+		snprintf(title, sizeof(title), "%s%s", entry->starred ? "* " : "", entry->title);
+
+		// The same shape as the player's library: two lines for a recording,
+		// one for a name, and a chevron on everything that opens another view.
+		const char *detail = NULL;
+		if (entry->kind == SUBSONIC_TRACK) {
+			detail = (entry->artist[0] && strcmp(entry->artist, entry->title) != 0)
+						 ? entry->artist
+						 : (entry->album[0] ? entry->album : NULL);
+		} else if (entry->kind == SUBSONIC_ALBUM) {
+			detail = entry->artist[0] ? entry->artist : NULL;
+		}
+		morpthis_list_add_entry(g_list, title, detail, NULL, entry->kind != SUBSONIC_TRACK);
 	}
+	update_playing_mark();
 }
 
 static void show_root(void) {
@@ -224,6 +293,7 @@ static void show_root(void) {
 		snprintf(g_entries[i].id, sizeof(g_entries[i].id), "%d", i);
 		snprintf(g_entries[i].title, sizeof(g_entries[i].title), "%s", ROOT_ITEMS[i].title);
 	}
+	morpthis_screen_set_title(g_main_screen, current_view_title());
 	render_entries();
 	refresh_status();
 }
@@ -236,15 +306,8 @@ static void show_not_configured(void) {
 	if (g_list) {
 		morpthis_list_clear(g_list);
 	}
+	morpthis_screen_set_title(g_main_screen, "Subsonic");
 	refresh_status();
-}
-
-static void format_entry(const subsonic_entry_t *entry, char *out, size_t size) {
-	if (entry->kind == SUBSONIC_TRACK && entry->artist[0] && strcmp(entry->artist, entry->title) != 0) {
-		snprintf(out, size, "%s%s - %s", entry->starred ? "* " : "", entry->title, entry->artist);
-	} else {
-		snprintf(out, size, "%s%s", entry->starred ? "* " : "", entry->title);
-	}
 }
 
 static void on_browse_done(const browse_result_t *result, void *user) {
@@ -264,12 +327,7 @@ static void on_browse_done(const browse_result_t *result, void *user) {
 		memcpy(g_entries, result->entries, (size_t)g_entry_count * sizeof(g_entries[0]));
 	}
 
-	morpthis_list_clear(g_list);
-	for (int i = 0; i < g_entry_count; i++) {
-		char text[384];
-		format_entry(&g_entries[i], text, sizeof(text));
-		morpthis_list_add(g_list, text);
-	}
+	render_entries();
 
 	if (g_entry_count == 0 && g_depth == 1 &&
 		(g_views[0].kind == SUBSONIC_BROWSE_ARTISTS || g_views[0].kind == SUBSONIC_BROWSE_FOLDERS)) {
@@ -332,13 +390,26 @@ static void open_entry(const subsonic_entry_t *entry) {
 // Playback
 // ---------------------------------------------------------------------------
 
-static bool track_format(const subsonic_entry_t *entry, subsonic_format_t *out) {
+static bool track_format(const subsonic_entry_t *entry, subsonic_format_t *out,
+						char *why, size_t why_size) {
 	subsonic_format_t format = g_settings.quality.format;
 	if (format == SUBSONIC_FORMAT_OPUS) {
+		snprintf(why, why_size, "Opus is not supported by this app. Choose MP3 or FLAC.");
 		return false; // no Opus decoder in this app
 	}
-	if (format == SUBSONIC_FORMAT_RAW && strcasecmp(entry->suffix, "flac") != 0 &&
-		strcasecmp(entry->suffix, "mp3") != 0) {
+	if (format == SUBSONIC_FORMAT_RAW) {
+		if (strcasecmp(entry->suffix, "flac") == 0 || strcasecmp(entry->suffix, "mp3") == 0) {
+			*out = format;
+			return true;
+		}
+		if (entry->suffix[0]) {
+			snprintf(why, why_size,
+					 "Original quality: .%s is not supported. Choose MP3 or FLAC transcoding.",
+					 entry->suffix);
+		} else {
+			snprintf(why, why_size,
+					 "Original quality: the server did not say what format this file is. Choose MP3 or FLAC transcoding.");
+		}
 		return false;
 	}
 	*out = format;
@@ -351,8 +422,9 @@ static bool play_queue_at(int index) {
 	}
 	const subsonic_entry_t *entry = &g_queue[index];
 	subsonic_format_t format;
-	if (!track_format(entry, &format)) {
-		show_error("playback", "This track's format is not supported. Choose MP3 or FLAC in settings.");
+	char why[192];
+	if (!track_format(entry, &format, why, sizeof(why))) {
+		show_error("playback", why);
 		return false;
 	}
 
@@ -375,9 +447,7 @@ static bool play_queue_at(int index) {
 	g_have_error = false;
 	g_queue_index = index;
 	snprintf(g_now_playing, sizeof(g_now_playing), "%s", entry->title);
-	if (g_queue_screen && morpthis_screen_active() == g_queue_screen) {
-		update_queue_screen();
-	}
+	update_playing_mark();
 	refresh_status();
 	return true;
 }
@@ -445,11 +515,13 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 		if (g_queue_index >= 0 && play_queue_at(g_queue_index + 1)) {
 			return;
 		}
+		update_playing_mark();
 		refresh_status();
 		return;
 	}
 	g_playing = false;
 	g_paused = false;
+	update_playing_mark();
 	show_error("playback", message[0] ? message : "Playback failed.");
 }
 
@@ -464,6 +536,7 @@ static void stop_playback(morpthis_widget_t *widget, void *user) {
 	g_playing = false;
 	g_paused = false;
 	g_have_error = false;
+	update_playing_mark();
 	refresh_status();
 }
 
@@ -674,19 +747,23 @@ static void update_queue_screen(void) {
 		return;
 	}
 	for (int i = 0; i < g_queue_count; i++) {
-		char text[384], line[400];
-		format_entry(&g_queue[i], text, sizeof(text));
-		snprintf(line, sizeof(line), "%s%s", i == g_queue_index ? "> " : "", text);
-		morpthis_list_add(g_queue_list, line);
+		const subsonic_entry_t *entry = &g_queue[i];
+		char title[220];
+		snprintf(title, sizeof(title), "%s%s", entry->starred ? "* " : "", entry->title);
+		const char *detail = (entry->artist[0] && strcmp(entry->artist, entry->title) != 0)
+							 ? entry->artist
+							 : (entry->album[0] ? entry->album : NULL);
+		morpthis_list_add_entry(g_queue_list, title, detail, NULL, false);
 	}
+	morpthis_list_set_playing(g_queue_list, (!g_playing && !g_paused) ? -1 : g_queue_index);
 }
 
 static void queue_selected(morpthis_widget_t *list, int index, void *user) {
 	(void)list;
 	(void)user;
 	if (index >= 0 && index < g_queue_count) {
+		// play_queue_at() redraws the queue when it is the screen on display.
 		play_queue_at(index);
-		update_queue_screen();
 	}
 }
 
@@ -699,6 +776,7 @@ static void queue_clear(morpthis_widget_t *widget, void *user) {
 	g_playing = false;
 	g_paused = false;
 	update_queue_screen();
+	update_playing_mark();
 	refresh_status();
 }
 
@@ -799,7 +877,8 @@ static bool apply_settings(char *error, size_t error_size) {
 	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
 		morpthis_logi("subsonic", "TLS %s, FLAC lossless", g_settings.tls_relaxed ? "relaxed" : "strict");
 	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
-		morpthis_logi("subsonic", "TLS %s, original (raw)", g_settings.tls_relaxed ? "relaxed" : "strict");
+		morpthis_logi("subsonic", "TLS %s, original (no transcoding)",
+					  g_settings.tls_relaxed ? "relaxed" : "strict");
 	} else {
 		morpthis_logi("subsonic", "TLS %s, %d kbps MP3", g_settings.tls_relaxed ? "relaxed" : "strict",
 					  g_settings.quality.max_bitrate);
@@ -827,9 +906,9 @@ static void update_settings_screen(void) {
 	morpthis_widget_set_text(g_tls_button, g_settings.tls_relaxed ? "TLS: relaxed" : "TLS: strict");
 	char quality[32];
 	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
-		snprintf(quality, sizeof(quality), "Quality: FLAC (lossless)");
+		snprintf(quality, sizeof(quality), "Quality: FLAC");
 	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
-		snprintf(quality, sizeof(quality), "Quality: original (raw)");
+		snprintf(quality, sizeof(quality), "Quality: original");
 	} else {
 		snprintf(quality, sizeof(quality), "Quality: %d kbps MP3", g_settings.quality.max_bitrate);
 	}
@@ -866,6 +945,8 @@ static void toggle_quality(morpthis_widget_t *widget, void *user) {
 		g_settings.quality.max_bitrate = 320;
 	} else if (g_settings.quality.format == SUBSONIC_FORMAT_MP3) {
 		g_settings.quality.format = SUBSONIC_FORMAT_FLAC;
+	} else if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
+		g_settings.quality.format = SUBSONIC_FORMAT_RAW;
 	} else {
 		g_settings.quality.format = SUBSONIC_FORMAT_MP3;
 		g_settings.quality.max_bitrate = 256;
@@ -877,6 +958,8 @@ static void toggle_quality(morpthis_widget_t *widget, void *user) {
 	update_settings_screen();
 	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
 		morpthis_toast("Next track: FLAC lossless (server transcoding).");
+	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
+		morpthis_toast("Next track: the original file, no transcoding.");
 	} else {
 		char text[48];
 		snprintf(text, sizeof(text), "Next track: %d kbps MP3.", g_settings.quality.max_bitrate);
@@ -1010,13 +1093,15 @@ static void on_button(morpthis_button_t button, morpthis_input_action_t action, 
 			back_to_main(NULL, NULL);
 		} else if (active && active == g_more_screen) {
 			back_to_main(NULL, NULL);
+		} else if (active && active == g_main_screen && g_depth > 0) {
+			// The player's chevron is the library's way up, as it is everywhere
+			// else in the player. Only the root uses it to leave the app.
+			go_up(NULL, NULL);
 		} else {
-			// The player handles its own chrome, but the host runner and a player
-			// that delivers BACK before quitting both need this to be the way out.
-			// A music app that is playing stays loaded instead: the chevron then
-			// hides its screens and the sound keeps going, and the status bar
-			// shows it is still playing. With nothing loaded there is nothing to
-			// keep, so BACK closes the app.
+			// At the root: a music app that is playing stays loaded instead. The
+			// chevron hides its screens and the sound keeps going, and the status
+			// bar shows it is still playing. With nothing loaded there is nothing
+			// to keep, so BACK closes the app.
 			if ((g_playing || g_paused) && morpthis_app_background()) {
 				break;
 			}
@@ -1041,30 +1126,26 @@ static bool create_main_screen(void) {
 
 	g_status = morpthis_label_create(g_main_screen, "Starting...");
 	morpthis_widget_set_pos(g_status, 0, 0);
-	morpthis_widget_set_size(g_status, g_width, 54);
+	morpthis_widget_set_size(g_status, g_width, 30);
 
 	g_list = morpthis_list_create(g_main_screen);
-	morpthis_widget_set_pos(g_list, 0, 58);
-	morpthis_widget_set_size(g_list, g_width, g_height - 58 - 46);
+	morpthis_widget_set_pos(g_list, 0, 34);
+	morpthis_widget_set_size(g_list, g_width, g_height - 34 - 44);
 	morpthis_list_set_select_cb(g_list, on_select, NULL);
 
-	int width = (g_width - 12) / 3;
+	int width = (g_width - 6) / 2;
 	if (width < 50) {
 		return false;
 	}
-	int y = g_height - 40;
-
-	morpthis_widget_t *up = morpthis_button_create(g_main_screen, "Up", go_up, NULL);
-	morpthis_widget_set_pos(up, 0, y);
-	morpthis_widget_set_size(up, width, 36);
+	int y = g_height - 38;
 
 	g_stop_button = morpthis_button_create(g_main_screen, "Stop", stop_playback, NULL);
-	morpthis_widget_set_pos(g_stop_button, width + 6, y);
-	morpthis_widget_set_size(g_stop_button, width, 36);
+	morpthis_widget_set_pos(g_stop_button, 0, y);
+	morpthis_widget_set_size(g_stop_button, width, 32);
 
 	morpthis_widget_t *more = morpthis_button_create(g_main_screen, "More", open_more, NULL);
-	morpthis_widget_set_pos(more, (width + 6) * 2, y);
-	morpthis_widget_set_size(more, width, 36);
+	morpthis_widget_set_pos(more, width + 6, y);
+	morpthis_widget_set_size(more, width, 32);
 
 	return true;
 }
@@ -1141,22 +1222,22 @@ static bool create_queue_screen(void) {
 
 	g_queue_list = morpthis_list_create(g_queue_screen);
 	morpthis_widget_set_pos(g_queue_list, 0, 0);
-	morpthis_widget_set_size(g_queue_list, g_width, g_height - 46);
+	morpthis_widget_set_size(g_queue_list, g_width, g_height - 42);
 	morpthis_list_set_select_cb(g_queue_list, queue_selected, NULL);
 
 	int width = (g_width - 12) / 2;
 	if (width < 50) {
 		return false;
 	}
-	int y = g_height - 40;
+	int y = g_height - 38;
 
 	morpthis_widget_t *clear = morpthis_button_create(g_queue_screen, "Clear", queue_clear, NULL);
 	morpthis_widget_set_pos(clear, 0, y);
-	morpthis_widget_set_size(clear, width, 36);
+	morpthis_widget_set_size(clear, width, 32);
 
 	morpthis_widget_t *back = morpthis_button_create(g_queue_screen, "Back", queue_back, NULL);
 	morpthis_widget_set_pos(back, width + 6, y);
-	morpthis_widget_set_size(back, width, 36);
+	morpthis_widget_set_size(back, width, 32);
 
 	return true;
 }
@@ -1169,7 +1250,7 @@ static bool create_search_screen(void) {
 
 	g_search_label = morpthis_label_create(g_search_screen, "Search: _");
 	morpthis_widget_set_pos(g_search_label, 0, 0);
-	morpthis_widget_set_size(g_search_label, g_width, 36);
+	morpthis_widget_set_size(g_search_label, g_width, 30);
 
 	static const char *const keys[] = {
 		"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
@@ -1177,15 +1258,24 @@ static bool create_search_screen(void) {
 		"SP", "DEL", "ESC", "GO",
 	};
 
-	int columns = 5;
+	// Six columns: thirty keys in five rows, all of them on the panel. The
+	// player's own keyboard is the same card key, so the shape reads as native.
+	int columns = 6;
 	int cell_w = g_width / columns;
-	int cell_h = 36;
-	int start_y = 40;
-	for (int i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); i++) {
+	int cell_h = 34;
+	int count = (int)(sizeof(keys) / sizeof(keys[0]));
+	int rows = (count + columns - 1) / columns;
+	// Sit on the bottom of the page, as the player's own keyboard does, with
+	// the query line left alone at the top.
+	int start_y = g_height - rows * cell_h - 6;
+	if (start_y < 36) {
+		start_y = 36;
+	}
+	for (int i = 0; i < count; i++) {
 		int row = i / columns;
 		int col = i % columns;
 		morpthis_widget_t *button = morpthis_button_create(g_search_screen, keys[i], search_key,
-													(void *)keys[i]);
+												(void *)keys[i]);
 		morpthis_widget_set_pos(button, col * cell_w, start_y + row * cell_h);
 		morpthis_widget_set_size(button, cell_w - 2, cell_h - 2);
 	}
