@@ -1,5 +1,7 @@
 #include <morpthis/morpthis.h>
 
+#include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -8,110 +10,1544 @@
 #include <string.h>
 #include <time.h>
 
+// -std=c11 keeps the maths header to the standard names; the game works in
+// degrees and wants the constant.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 MORPTHIS_DEFINE_API_VERSION();
 
-// Flappy Bird as an SDK app.
-//
-// The game runs in the player's content area, in panel pixels. The artwork is
-// the player's own Flappy Bird set, re-scaled before check-in to the size each
-// widget draws it at: the SDK's image widgets fit a picture inside their box
-// and never enlarge a smaller source.
-//
-// API 1 has no timer. A thread of the app's own keeps a 16 ms clock and posts
-// each tick with morpthis_app_post(), so every widget call still runs on the
-// GUI thread, where the SDK requires it.
+static morpthis_screen_t *screen;
+static morpthis_widget_t *canvas;
+
+typedef struct {
+	int x1, y1, x2, y2;
+} area_t;
+
+typedef struct {
+	int x, y;
+} point_t;
 
 // ---------------------------------------------------------------------------
-// The world
+// the world
 // ---------------------------------------------------------------------------
+//
+// The game runs in the artwork's own pixels, 60 steps a second, and every
+// drawing is shown at the profile's integer scale, straight into `frame`. The
+// background and the ground are kept already widened to that scale
+// (`bg_wide`, `ground_wide`), so a row of either is one or two memcpy.
+//
+// `frame` is an SDK canvas: the app draws, then invalidates the areas the last
+// render changed. That is the same software blitter as the player's own page,
+// which is what makes a step cost a few memcpys instead of a widget layout.
 
-#define STEP_MS 16
-#define MAX_STEPS 4
-#define STALL_MS 250
+#define ART_DIR "assets/sprites"
+#define ART_MAX_BYTES (256 * 1024)
 
-#define GROUND_H 88
-#define GROUND_W 336
-#define BG_W 288
-#define BG_H 160
+static int game_scale = 4;
+#define SCALE game_scale
 
+#define STEP_US 16667
+#define MAX_STEPS_PER_TICK 4
+// A gap between two ticks from which the steps it held are made up.
+#define CATCH_UP_US 50000
+// The tick's own period. Each tick runs the steps its time is worth, rounded
+// to the nearest, and puts the frame on the panel before returning.
+#define TICK_MS 16
+// A gap between two ticks this long means the panel was dark: a game in
+// progress waits for a tap instead of carrying on.
+#define STALL_US 250000
+
+#define BG_W 144
+#define BG_H 256
+#define GROUND_W 168
+#define GROUND_H 56
+
+// The game itself runs in units of half an artwork pixel -- the 288x512
+// coordinates of the original, whose physics this reproduces -- and a unit is
+// UNIT_PX panel pixels.
+#define UNIT_PX (SCALE / 2)
+
+// Units a step for the ground and the pipes; panel pixels a step for the
+// background, a quarter of the ground's speed.
+#define WORLD_SPEED 2
+#define BG_PX_PER_STEP 1
+
+#define PIPE_W 26 // artwork pixels
+#define PIPE_H 160
+#define PIPE_W_U (PIPE_W * 2)
+#define PIPE_H_U (PIPE_H * 2)
+#define PIPE_GAP_U 96
+#define PIPE_SPACING_U 157
 #define PIPE_COUNT 3
-#define PIPE_W 52
-#define PIPE_H 320
-#define PIPE_GAP 80
-#define PIPE_SPACING 157
-#define PIPE_MARGIN 16
-#define PIPE_MIN_CHANGE 24
-#define FIRST_PIPE_AHEAD 120
+#define FIRST_PIPE_AHEAD_U 120
+// The opening stays this far from the top of the screen and from the ground,
+// and moves at least PIPE_MIN_CHANGE_U from one pipe to the next.
+#define PIPE_MARGIN_U 32
+#define PIPE_MIN_CHANGE_U 24
 
-#define BIRD_BOX 20
-#define BIRD_LEFT 62
-#define BIRD_W 34
-#define BIRD_H 24
-#define BIRD_COLOURS 8
+// The bird is a BIRD_BOX_U square hit box with its left edge at BIRD_LEFT_U,
+// and the drawing centred on it.
+#define BIRD_W 17 // artwork pixels
+#define BIRD_H 12
+#define BIRD_BOX_U 20
+#define BIRD_LEFT_U 62
 
+// Per step, in units. The height is a whole number moved by the speed
+// truncated toward zero, and a flap takes only with the top of the box on the
+// screen. With the whole drawing above the screen the bird is lost.
 #define GRAVITY 0.3f
-#define FLAP_VELOCITY (-5.0f)
+#define FLAP_VELOCITY -5.0f
 #define MAX_FALL 8.0f
-#define LOST_ABOVE (-22)
+#define LOST_ABOVE_U (-(BIRD_BOX_U / 2 + BIRD_H))
 
-// The top of the bird's hit box at rest on the Get Ready screen.
-#define READY_TOP 78
+// Degrees, positive with the beak down. A flap sets the turning speed to
+// ROT_FLAP_RATE, which grows by ROT_ACCEL a step; the angle stays within
+// ROT_MIN..ROT_MAX.
+#define ROT_FLAP_RATE -10.0f
+#define ROT_ACCEL 0.4f
+#define ROT_MIN -20.0f
+#define ROT_MAX 90.0f
+
+// The wings go 1-2-3-2 on an animation clock of ANIM_MS_PER_STEP a step: one
+// drawing every IDLE_FRAME_MS while waiting, and after a flap FLAP_FRAMES
+// drawings of FLAP_FRAME_MS each, then the middle drawing until the next flap.
+#define ANIM_MS_PER_STEP 15.0f
+#define IDLE_FRAME_MS 100.0f
+#define FLAP_FRAME_MS (1000.0f / 30)
+#define FLAP_FRAMES 12
+
+// While waiting the bird bobs BOB_U units up and down, BOB_DEG_STEP degrees of
+// a sine a step.
+#define BOB_U 4.0f
+#define BOB_DEG_STEP 8
 
 #define MEDAL_BRONZE_AT 10
 #define MEDAL_SILVER_AT 20
 #define MEDAL_GOLD_AT 30
 
-// Drawn sizes. Keep these in step with assets/.
-#define LOGO_W 178
-#define LOGO_H 48
-#define READY_W 184
-#define READY_H 50
-#define HOWTO_W 57
-#define HOWTO_H 49
-#define OVER_W 192
-#define OVER_H 42
-#define BOARD_W 226
-#define BOARD_H 114
-#define MEDAL_W 44
-#define MEDAL_H 44
-#define NEW_W 32
-#define NEW_H 14
-
-// Score digits. The board's are the small set; the running score is the big
-// one. The gaps are the original's, in pixels.
-#define DIGITS_MAX 3
-#define BIG_W 24
-#define BIG_H 36
-#define BIG_GAP (-2)
-#define SMALL_W 14
-#define SMALL_H 20
-#define SMALL_GAP 2
-
+// The white flash of a hit, in steps. Then, counted from the bird coming to
+// rest on the ground: Game Over, the board rising, the score counting up.
 #define FLASH_STEPS 12
+#define FLASH_OPA 220
+#define OVER_LABEL_AT 24
+#define OVER_LABEL_STEPS 12
+#define OVER_BOARD_AT 54
+#define OVER_BOARD_STEPS 24
+#define OVER_COUNT_AT (OVER_BOARD_AT + OVER_BOARD_STEPS)
+#define OVER_COUNT_STEPS 45
+#define OVER_DONE_AT (OVER_COUNT_AT + OVER_COUNT_STEPS)
+
+// Half of a fade through black between two screens of the game.
 #define FADE_STEPS 10
+
+// Screen positions at four-times scale for the regular 480x720 panel. The
+// V1 uses two-times scale and a shift that keeps the same composition inside
+// its shorter 320-pixel display.
+#define TITLE_LOGO_Y 96
+#define TITLE_PLAY_ABOVE_GROUND 20
+#define CORNER_MARGIN 24
+#define SCORE_Y 40
+#define READY_LABEL_Y 100
+#define HOW_TO_ABOVE_GROUND 16
+#define READY_BIRD_ABOVE_HOW_TO 34
+#define OVER_LABEL_Y 60
+#define OVER_BOARD_Y 170
+#define OVER_BUTTONS_GAP 24
+#define BUTTON_PRESS_SHIFT SCALE
+
+// Artwork pixels between two digits: the running score's overlap by one, the
+// board's stand one apart.
+#define DIGIT_GAP_BIG -1
+#define DIGIT_GAP_SMALL 1
+
+// Where things sit on the score board, in its own pixels.
+#define BOARD_MEDAL_X 12
+#define BOARD_MEDAL_Y 21
+#define BOARD_DIGITS_RIGHT 103
+#define BOARD_SCORE_Y 17
+#define BOARD_BEST_Y 38
+#define BOARD_BEST_LABEL_X 85 // the printed BEST: left edge, top row, height
+#define BOARD_BEST_LABEL_Y 30
+#define BOARD_BEST_LABEL_H 6
+#define BOARD_NEW_GAP 3
+
+// ---------------------------------------------------------------------------
+// the artwork
+// ---------------------------------------------------------------------------
+
+// RGB565 pixels and a mask: every PNG in the set is either fully opaque or
+// fully transparent per pixel. `mask` is NULL for a drawing with no hole.
+// `wide`, for the drawings put on every frame, holds the rows already
+// widened SCALE times (sprite_keep_wide).
+typedef struct {
+	int w, h;
+	uint16_t *rgb;
+	uint8_t *mask;
+	uint16_t *wide;
+} sprite_t;
+
+enum { BIRD_YELLOW, BIRD_RED, BIRD_BLUE, BIRD_GREEN, BIRD_PEACH, BIRD_PURPLE, BIRD_COW, BIRD_RARE, BIRD_COLOURS };
+enum { MEDAL_BRONZE, MEDAL_SILVER, MEDAL_GOLD, MEDALS };
+
+static const char *const BIRD_NAMES[BIRD_COLOURS] = {
+	"yellow", "red", "blue", "green", "peach", "purple", "cow", "rare",
+};
+
+// How often each bird comes out, out of the sum: the cow is rare, the rare
+// one rarer.
+static const int BIRD_WEIGHTS[BIRD_COLOURS] = {10, 10, 10, 10, 10, 10, 3, 1};
+
+static const char *const MEDAL_NAMES[MEDALS] = {"bronze", "silver", "gold"};
+
+static sprite_t art_bg[2]; // day, night
+static sprite_t art_ground;
+static sprite_t art_pipe_upper; // pipe-up.png: hangs from the top, mouth down
+static sprite_t art_pipe_lower; // pipe-down.png: stands on the ground, mouth up
+static sprite_t art_bird[BIRD_COLOURS][3];
+static sprite_t art_digit_big[10];	 // score-game-N: the score while playing
+static sprite_t art_digit_small[10]; // score-N: the score board
+static sprite_t art_medal[MEDALS];
+static sprite_t art_logo, art_get_ready, art_how_to, art_game_over, art_board, art_new;
+static sprite_t art_play, art_menu, art_exit, art_sound_on, art_sound_off;
+
+static void sprite_free(sprite_t *s) {
+	free(s->rgb);
+	free(s->mask);
+	free(s->wide);
+	memset(s, 0, sizeof(*s));
+}
+
+static uint16_t spr_u16(const uint8_t *p) {
+	return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+// A sprite is a small binary checked in beside the app: "MSPR", width and
+// height as 16-bit little-endian, a byte saying whether a mask follows, three
+// reserved bytes, then width*height RGB565 pixels and, when present, one mask
+// byte per pixel (0 or 255). The app decodes its own art so the pixels arrive
+// exactly as drawn -- a transparent edge stays transparent, not a fringe of
+// whatever colour the PNG had under it.
+static bool sprite_load(sprite_t *s, const char *name) {
+	char path[128];
+	snprintf(path, sizeof(path), ART_DIR "/%s.spr", name);
+
+	morpthis_file_t *f = morpthis_fs_open(path, MORPTHIS_FS_READ);
+	if (!f) {
+		morpthis_logw("flappy", "%s: %s", path, strerror(errno));
+		return false;
+	}
+	if (morpthis_fs_seek(f, 0, SEEK_END) != 0) {
+		morpthis_fs_close(f);
+		return false;
+	}
+	long size = morpthis_fs_tell(f);
+	if (size < 12 || size > ART_MAX_BYTES) {
+		morpthis_fs_close(f);
+		return false;
+	}
+	uint8_t *data = malloc((size_t)size);
+	if (!data) {
+		morpthis_fs_close(f);
+		return false;
+	}
+	bool got = morpthis_fs_seek(f, 0, SEEK_SET) == 0 &&
+			   morpthis_fs_read(f, data, (size_t)size) == (size_t)size;
+	morpthis_fs_close(f);
+	if (!got || memcmp(data, "MSPR", 4) != 0) {
+		morpthis_logw("flappy", "%s is not a sprite", path);
+		free(data);
+		return false;
+	}
+
+	int w = spr_u16(data + 4);
+	int h = spr_u16(data + 6);
+	bool has_mask = data[8] != 0;
+	size_t n = (size_t)w * (size_t)h;
+	size_t need = 12 + n * sizeof(uint16_t) + (has_mask ? n : 0);
+	if (w <= 0 || h <= 0 || need > (size_t)size) {
+		morpthis_logw("flappy", "%s is truncated", path);
+		free(data);
+		return false;
+	}
+
+	s->rgb = malloc(n * sizeof(uint16_t));
+	s->mask = has_mask ? malloc(n) : NULL;
+	if (!s->rgb || (has_mask && !s->mask)) {
+		free(data);
+		sprite_free(s);
+		return false;
+	}
+	memcpy(s->rgb, data + 12, n * sizeof(uint16_t));
+	if (has_mask) {
+		memcpy(s->mask, data + 12 + n * sizeof(uint16_t), n);
+	}
+	free(data);
+	s->w = w;
+	s->h = h;
+	return true;
+}
+
+// Widen one artwork row at the selected scale. The four-times path keeps the
+// paired stores used by the original display; the V1 writes two copies.
+static void widen_row(uint16_t *dst, const uint16_t *src, int n) {
+	uint32_t *d = (uint32_t *)dst;
+	if (SCALE == 4) {
+		for (int x = 0; x < n; x++) {
+			uint32_t pair = (uint32_t)src[x] | ((uint32_t)src[x] << 16);
+			d[2 * x] = pair;
+			d[2 * x + 1] = pair;
+		}
+	} else if (SCALE == 2) {
+		for (int x = 0; x < n; x++) {
+			d[x] = (uint32_t)src[x] | ((uint32_t)src[x] << 16);
+		}
+	} else {
+		for (int x = 0; x < n; x++) {
+			for (int r = 0; r < SCALE; r++) {
+				dst[x * SCALE + r] = src[x];
+			}
+		}
+	}
+}
+
+static bool sprite_keep_wide(sprite_t *s) {
+	s->wide = malloc((size_t)s->w * s->h * SCALE * sizeof(uint16_t));
+	if (!s->wide) {
+		return false;
+	}
+	for (int y = 0; y < s->h; y++) {
+		widen_row(s->wide + (size_t)y * s->w * SCALE, s->rgb + (size_t)y * s->w, s->w);
+	}
+	return true;
+}
+
+static void art_free(void) {
+	for (int i = 0; i < 2; i++) {
+		sprite_free(&art_bg[i]);
+	}
+	sprite_free(&art_ground);
+	sprite_free(&art_pipe_upper);
+	sprite_free(&art_pipe_lower);
+	for (int c = 0; c < BIRD_COLOURS; c++) {
+		for (int i = 0; i < 3; i++) {
+			sprite_free(&art_bird[c][i]);
+		}
+	}
+	for (int i = 0; i < 10; i++) {
+		sprite_free(&art_digit_big[i]);
+		sprite_free(&art_digit_small[i]);
+	}
+	for (int i = 0; i < MEDALS; i++) {
+		sprite_free(&art_medal[i]);
+	}
+	sprite_free(&art_logo);
+	sprite_free(&art_get_ready);
+	sprite_free(&art_how_to);
+	sprite_free(&art_game_over);
+	sprite_free(&art_board);
+	sprite_free(&art_new);
+	sprite_free(&art_play);
+	sprite_free(&art_menu);
+	sprite_free(&art_exit);
+	sprite_free(&art_sound_on);
+	sprite_free(&art_sound_off);
+}
+
+// Every file, or false at the first one missing. The drawing code relies on
+// the sizes of the background, the ground, the pipes and the bird, so those
+// are checked too.
+static bool art_load(void) {
+	char name[48];
+	bool ok = sprite_load(&art_bg[0], "BG-day") && sprite_load(&art_bg[1], "BG-night") &&
+			  sprite_load(&art_ground, "ground") && sprite_load(&art_pipe_upper, "pipe-up") &&
+			  sprite_load(&art_pipe_lower, "pipe-down") && sprite_load(&art_logo, "logo") &&
+			  sprite_load(&art_get_ready, "get-ready") && sprite_load(&art_how_to, "how-to") &&
+			  sprite_load(&art_game_over, "game-over") && sprite_load(&art_board, "score-board") &&
+			  sprite_load(&art_new, "new-record-label") && sprite_load(&art_play, "play-button") &&
+			  sprite_load(&art_menu, "menu") && sprite_load(&art_exit, "exit-button") &&
+			  sprite_load(&art_sound_on, "sound-on") && sprite_load(&art_sound_off, "sound-off");
+
+	for (int c = 0; ok && c < BIRD_COLOURS; c++) {
+		for (int i = 0; ok && i < 3; i++) {
+			snprintf(name, sizeof(name), "bird-%s-%02d", BIRD_NAMES[c], i + 1);
+			ok = sprite_load(&art_bird[c][i], name) && art_bird[c][i].w == BIRD_W && art_bird[c][i].h == BIRD_H;
+		}
+	}
+	for (int i = 0; ok && i < 10; i++) {
+		snprintf(name, sizeof(name), "score-game-%d", i);
+		ok = sprite_load(&art_digit_big[i], name);
+		snprintf(name, sizeof(name), "score-%d", i);
+		ok = ok && sprite_load(&art_digit_small[i], name);
+	}
+	for (int i = 0; ok && i < MEDALS; i++) {
+		snprintf(name, sizeof(name), "medal-%s", MEDAL_NAMES[i]);
+		ok = sprite_load(&art_medal[i], name);
+	}
+
+	if (ok) {
+		ok = sprite_keep_wide(&art_pipe_upper) && sprite_keep_wide(&art_pipe_lower) &&
+			 sprite_keep_wide(&art_get_ready) && sprite_keep_wide(&art_how_to);
+		for (int i = 0; ok && i < 10; i++) {
+			ok = sprite_keep_wide(&art_digit_big[i]);
+		}
+	}
+	if (ok) {
+		ok = art_bg[0].w == BG_W && art_bg[0].h == BG_H && art_bg[1].w == BG_W && art_bg[1].h == BG_H &&
+			 art_ground.w == GROUND_W && art_ground.h == GROUND_H && art_pipe_upper.w == PIPE_W &&
+			 art_pipe_upper.h == PIPE_H && art_pipe_lower.w == PIPE_W && art_pipe_lower.h == PIPE_H;
+		if (!ok) {
+			morpthis_logw("flappy", "the background, ground or bird drawings are not the expected size");
+		}
+	}
+	return ok;
+}
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+
+typedef enum {
+	ST_TITLE,  // logo, play and exit
+	ST_READY,  // Get Ready: the first tap starts the game
+	ST_PLAY,
+	ST_PAUSED, // the panel went dark mid-game: frozen until the next tap
+	ST_DYING,  // hit a pipe, falling to the ground
+	ST_OVER,
+} game_state_t;
+
+typedef struct {
+	int x; // left edge, units
+	int gap_top; // units
+	bool scored;
+} pipe_t;
+
+typedef enum { WINGS_IDLE, WINGS_FLAP, WINGS_REST } wings_t;
+
+typedef enum { BTN_NONE, BTN_PLAY, BTN_MENU, BTN_EXIT, BTN_SOUND } button_t;
+
+// The game's own sounds. The mixer thread loads them; `sound_play` restarts
+// one from the GUI thread.
+typedef enum { SFX_WING, SFX_POINT, SFX_HIT, SFX_DIE, SFX_SWOOSH, SFX_KINDS } sfx_t;
+
+static void sound_play(sfx_t sfx);
+static void sound_save(bool on);
+static void best_save(int value);
+
+static int panel_w, panel_h;
+static int view_h;		  // the panel's height in artwork pixels
+static int ground_top;	  // artwork pixels
+static int bg_row0;		  // the background's row at the top of the panel
+static int layout_shift;  // panel pixels
+static uint16_t *frame;	  // panel_w x panel_h
+static uint16_t *bg_wide; // ground_top rows of BG_W * SCALE, from bg_row0
+static uint16_t *ground_wide; // GROUND_H rows of GROUND_W * SCALE
+// Per row of bg_wide and ground_wide: its colour when the row is one colour,
+// otherwise -1. Below ground_varied_rows every row of the ground is one colour.
+static int32_t bg_flat[BG_H];
+static int32_t ground_flat[GROUND_H];
+static int ground_varied_rows;
+// Panel rows above `band_top` are background of one colour per row: while
+// the bird is in the air only the moving things in it change. Below it, down
+// to the ground's last changing row, every row changes as the world scrolls.
+static int band_top;
+
+// `frame` and both pages of the panel hold the last frame whole, so the next
+// one can be drawn in part (see render).
+static bool frame_whole;
+
+#define MAX_MOVING 8
+// Where the moving things were drawn above band_top in the last frame, and
+// the areas the last render changed, for the invalidation.
+static area_t moved[MAX_MOVING];
+static int moved_n;
+static area_t changed[2 * MAX_MOVING + 1];
+static int changed_n;
+
+static bool active;
+static bool dirty;
+static int64_t last_us;
+
+// How the frames went, for one line in the log when the game is left.
+static struct {
+	unsigned ticks, frames, late, slow;
+	int64_t since, longest_gap, longest_work, work;
+} stats;
+
+static game_state_t state;
+static pipe_t pipes[PIPE_COUNT];
+static int bird_c; // top of the hit box, units
+static float bird_v, bird_g;
+static float rot_q, rot_r;
+static int bob_deg;
+static wings_t wings;
+static float wing_ms;
+static int wing_i;
+static int bird_colour;
+static int bg_index;
+// The look was chosen for the title screen and the game that follows keeps it.
+static bool look_kept;
+static int world_px; // how far ground and pipes have moved, panel pixels
+static int bg_px;
+static int score, best, best_before;
+static bool new_best;
+static bool best_unsaved;
+static int over_t;
+static int flash_t = -1;
+static int fade_t = -1;
+static void (*fade_action)(void);
+static button_t pressed_button = BTN_NONE;
+// The game's own sounds, [flappybird] sound. Off leaves the music playing.
+// Read by the mixer thread; written by the GUI thread.
+static volatile bool sound_on;
+
+static int64_t now_us(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+// ---------------------------------------------------------------------------
+// background and ground
+// ---------------------------------------------------------------------------
+
+// A panel row from a horizontally repeating row `src_w` wide, `offset`
+// pixels scrolled.
+static void wrap_row(uint16_t *dst, const uint16_t *src, int src_w, int offset) {
+	int x = 0;
+	while (x < panel_w) {
+		int n = src_w - offset;
+		if (n > panel_w - x) {
+			n = panel_w - x;
+		}
+		memcpy(dst + x, src + offset, (size_t)n * sizeof(uint16_t));
+		x += n;
+		offset = 0;
+	}
+}
+
+// `rows` rows of `s` from `row0`, each pixel repeated SCALE times across.
+static void widen(uint16_t *dst, const sprite_t *s, int row0, int rows) {
+	for (int y = 0; y < rows; y++) {
+		widen_row(dst + (size_t)y * s->w * SCALE, s->rgb + (size_t)(row0 + y) * s->w, s->w);
+	}
+}
+
+// For each of `rows` rows of `s` from `row0`: its colour when the whole row is
+// one colour, otherwise -1.
+static void find_flat_rows(const sprite_t *s, int row0, int rows, int32_t *out) {
+	for (int y = 0; y < rows; y++) {
+		const uint16_t *src = s->rgb + (size_t)(row0 + y) * s->w;
+		out[y] = src[0];
+		for (int x = 1; x < s->w; x++) {
+			if (src[x] != src[0]) {
+				out[y] = -1;
+				break;
+			}
+		}
+	}
+}
+
+// Columns x1..x2 of a row, in pixel pairs where they line up.
+static void fill_span(uint16_t *row, int x1, int x2, uint16_t colour) {
+	if (x1 & 1) {
+		row[x1++] = colour;
+	}
+	uint32_t pair = (uint32_t)colour | ((uint32_t)colour << 16);
+	uint32_t *d = (uint32_t *)(row + x1);
+	int pairs = (x2 - x1 + 1) / 2;
+	for (int i = 0; i < pairs; i++) {
+		d[i] = pair;
+	}
+	if (x1 + pairs * 2 <= x2) {
+		row[x2] = colour;
+	}
+}
+
+static void fill_row(uint16_t *dst, uint16_t colour) { fill_span(dst, 0, panel_w - 1, colour); }
+
+// The background from panel row `from` down to the ground.
+static void draw_background(int from) {
+	int w = BG_W * SCALE;
+	for (int y = from; y < ground_top * SCALE; y++) {
+		uint16_t *row = frame + (size_t)y * panel_w;
+		int32_t flat = bg_flat[y / SCALE];
+		if (flat >= 0) {
+			fill_row(row, (uint16_t)flat);
+		} else {
+			wrap_row(row, bg_wide + (size_t)(y / SCALE) * w, w, bg_px % w);
+		}
+	}
+}
+
+// The ground down to the last row that changes as it scrolls, or all of it.
+static void draw_ground(bool whole) {
+	int w = GROUND_W * SCALE;
+	int top = ground_top * SCALE;
+	int end = whole ? panel_h : top + ground_varied_rows * SCALE;
+	for (int y = top; y < end; y++) {
+		int sy = (y - top) / SCALE;
+		if (sy >= GROUND_H) {
+			sy = GROUND_H - 1;
+		}
+		uint16_t *row = frame + (size_t)y * panel_w;
+		if (ground_flat[sy] >= 0) {
+			fill_row(row, (uint16_t)ground_flat[sy]);
+		} else {
+			wrap_row(row, ground_wide + (size_t)sy * w, w, world_px % w);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sprites
+// ---------------------------------------------------------------------------
+
+// `opa` 0..255, rounded to 256ths.
+static uint16_t blend565(uint16_t fg, uint16_t bg, unsigned opa) {
+	unsigned a = opa + (opa >> 7);
+	unsigned inv = 256 - a;
+	unsigned r = (((fg >> 11) & 31) * a + ((bg >> 11) & 31) * inv) >> 8;
+	unsigned g = (((fg >> 5) & 63) * a + ((bg >> 5) & 63) * inv) >> 8;
+	unsigned b = ((fg & 31) * a + (bg & 31) * inv) >> 8;
+	return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+// `s` at the selected scale with its top left at (x, y) on the panel, down
+// to row `y_end` (exclusive). Opaque runs go in with memcpy.
+static void blit_scaled_clipped(const sprite_t *s, int x, int y, int y_end, unsigned opa) {
+	if (opa == 0) {
+		return;
+	}
+	if (y_end > panel_h) {
+		y_end = panel_h;
+	}
+	uint32_t pairs[BG_W * 2]; // enough for a four-times widened row
+	for (int j = 0; j < s->h; j++) {
+		int top = y + j * SCALE;
+		if (top >= y_end) {
+			break;
+		}
+		if (top + SCALE <= 0) {
+			continue;
+		}
+		const uint16_t *src = s->rgb + j * s->w;
+		const uint8_t *m = s->mask ? s->mask + j * s->w : NULL;
+		int i = 0;
+		while (i < s->w) {
+			if (m && !m[i]) {
+				i++;
+				continue;
+			}
+			int run = i;
+			while (run < s->w && (!m || m[run])) {
+				run++;
+			}
+			// Pixels i..run-1 are opaque: widened (or taken widened), then
+			// written into each of the SCALE rows, clipped left and right.
+			int x0 = x + i * SCALE, x1 = x + run * SCALE;
+			int cut = x0 < 0 ? -x0 : 0;
+			if (x1 > panel_w) {
+				x1 = panel_w;
+			}
+			if (x0 + cut < x1) {
+				const uint16_t *wide;
+				if (s->wide) {
+					wide = s->wide + ((size_t)j * s->w + i) * SCALE;
+				} else {
+					widen_row((uint16_t *)pairs, src + i, run - i);
+					wide = (const uint16_t *)pairs;
+				}
+				for (int r = 0; r < SCALE; r++) {
+					int py = top + r;
+					if (py < 0 || py >= y_end) {
+						continue;
+					}
+					uint16_t *row = frame + (size_t)py * panel_w;
+					if (opa >= 255) {
+						memcpy(row + x0 + cut, wide + cut, (size_t)(x1 - x0 - cut) * sizeof(uint16_t));
+					} else {
+						for (int px = x0 + cut; px < x1; px++) {
+							row[px] = blend565(wide[px - x0], row[px], opa);
+						}
+					}
+				}
+			}
+			i = run;
+		}
+	}
+}
+
+static void blit_scaled(const sprite_t *s, int x, int y, unsigned opa) {
+	blit_scaled_clipped(s, x, y, panel_h, opa);
+}
+
+// `s` at the selected scale, centred on (cx, cy) and turned by `deg`,
+// positive anticlockwise. Nearest neighbour, so the pixels stay square.
+static void blit_scaled_turned(const sprite_t *s, float cx, float cy, float deg) {
+	if (fabsf(deg) < 0.5f) {
+		blit_scaled(s, (int)lroundf(cx - s->w * SCALE / 2.0f), (int)lroundf(cy - s->h * SCALE / 2.0f), 255);
+		return;
+	}
+	float rad = deg * (float)M_PI / 180.0f;
+	float cs = cosf(rad) / SCALE, sn = sinf(rad) / SCALE;
+	int reach = (int)ceilf(sqrtf((float)(s->w * s->w + s->h * s->h)) * SCALE / 2.0f) + 1;
+	int x0 = (int)floorf(cx) - reach, y0 = (int)floorf(cy) - reach;
+	for (int py = y0; py <= y0 + 2 * reach; py++) {
+		if (py < 0 || py >= panel_h) {
+			continue;
+		}
+		uint16_t *row = frame + (size_t)py * panel_w;
+		// The source position of the first pixel of the row, then one step
+		// along the turned x axis per pixel.
+		float dx = (float)x0 + 0.5f - cx;
+		float dy = (float)py + 0.5f - cy;
+		float u = cs * dx - sn * dy + s->w / 2.0f;
+		float v = sn * dx + cs * dy + s->h / 2.0f;
+		for (int px = x0; px <= x0 + 2 * reach; px++, u += cs, v += sn) {
+			if (px < 0 || px >= panel_w || u < 0 || v < 0) {
+				continue;
+			}
+			int iu = (int)u, iv = (int)v;
+			if (iu >= s->w || iv >= s->h) {
+				continue;
+			}
+			int k = iv * s->w + iu;
+			if (!s->mask || s->mask[k]) {
+				row[px] = s->rgb[k];
+			}
+		}
+	}
+}
+
+// The whole frame tinted with `colour` at `opa`.
+static void wash(uint16_t colour, unsigned opa) {
+	if (opa == 0) {
+		return;
+	}
+	size_t n = (size_t)panel_w * panel_h;
+	if (opa >= 255) {
+		for (size_t i = 0; i < n; i++) {
+			frame[i] = colour;
+		}
+		return;
+	}
+	unsigned a = opa + (opa >> 7);
+	unsigned inv = 256 - a;
+	unsigned cr = ((colour >> 11) & 31) * a, cg = ((colour >> 5) & 63) * a, cb = (colour & 31) * a;
+	for (size_t i = 0; i < n; i++) {
+		uint16_t p = frame[i];
+		unsigned r = (cr + ((p >> 11) & 31) * inv) >> 8;
+		unsigned g = (cg + ((p >> 5) & 63) * inv) >> 8;
+		unsigned b = (cb + (p & 31) * inv) >> 8;
+		frame[i] = (uint16_t)((r << 11) | (g << 5) | b);
+	}
+}
+
+static int number_width(const sprite_t *digits, int gap, int value) {
+	char text[16];
+	int len = snprintf(text, sizeof(text), "%d", value);
+	int w = 0;
+	for (int i = 0; i < len; i++) {
+		w += digits[text[i] - '0'].w;
+	}
+	return (w + (len - 1) * gap) * SCALE;
+}
+
+static void draw_number(const sprite_t *digits, int gap, int value, int x, int y) {
+	char text[16];
+	int len = snprintf(text, sizeof(text), "%d", value);
+	for (int i = 0; i < len; i++) {
+		const sprite_t *d = &digits[text[i] - '0'];
+		blit_scaled(d, x, y, 255);
+		x += (d->w + gap) * SCALE;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// layout
+// ---------------------------------------------------------------------------
+
+static int layout_px(int regular_scale_pixels) { return regular_scale_pixels * SCALE / 4; }
+
+static int ground_top_px(void) { return ground_top * SCALE; }
+
+static int how_to_y(void) { return ground_top_px() - art_how_to.h * SCALE - layout_px(HOW_TO_ABOVE_GROUND); }
+
+static int ready_bird_y_px(void) { return how_to_y() - layout_px(READY_BIRD_ABOVE_HOW_TO); }
+
+static bool buttons_shown(void) {
+	return state == ST_TITLE || (state == ST_OVER && over_t >= OVER_COUNT_AT);
+}
+
+// The rectangle of `b` on the panel, before any press shift. False when the
+// button is not on screen now.
+static bool button_rect(button_t b, area_t *a) {
+	if (!buttons_shown()) {
+		return false;
+	}
+	const sprite_t *s = NULL;
+	int x = 0, y = 0;
+	if (b == BTN_SOUND) {
+		// Bottom right, on the title screen and after a game.
+		s = &art_sound_on;
+		x = panel_w - s->w * SCALE - layout_px(CORNER_MARGIN);
+		y = panel_h - s->h * SCALE - layout_px(CORNER_MARGIN);
+	} else if (state == ST_TITLE) {
+		if (b == BTN_PLAY) {
+			s = &art_play;
+			x = (panel_w - s->w * SCALE) / 2;
+			y = ground_top_px() - s->h * SCALE - layout_px(TITLE_PLAY_ABOVE_GROUND);
+		} else if (b == BTN_EXIT) {
+			s = &art_exit;
+			x = panel_w - s->w * SCALE - layout_px(CORNER_MARGIN);
+			y = layout_px(CORNER_MARGIN);
+		}
+	} else {
+		// Play under the board, Menu under Play.
+		int play_y = layout_px(OVER_BOARD_Y) + layout_shift + art_board.h * SCALE + layout_px(OVER_BUTTONS_GAP);
+		if (b == BTN_PLAY) {
+			s = &art_play;
+			y = play_y;
+		} else if (b == BTN_MENU) {
+			s = &art_menu;
+			y = play_y + art_play.h * SCALE + layout_px(OVER_BUTTONS_GAP);
+		}
+		if (s) {
+			x = (panel_w - s->w * SCALE) / 2;
+		}
+	}
+	if (!s) {
+		return false;
+	}
+	a->x1 = x;
+	a->y1 = y;
+	a->x2 = x + s->w * SCALE - 1;
+	a->y2 = y + s->h * SCALE - 1;
+	return true;
+}
+
+static void draw_button(button_t b, const sprite_t *s) {
+	area_t a;
+	if (button_rect(b, &a)) {
+		blit_scaled(s, a.x1, a.y1 + (pressed_button == b ? BUTTON_PRESS_SHIFT : 0), 255);
+	}
+}
+
+static button_t button_at(const point_t *p) {
+	static const button_t ALL[] = {BTN_PLAY, BTN_MENU, BTN_EXIT, BTN_SOUND};
+	for (size_t i = 0; i < sizeof(ALL) / sizeof(ALL[0]); i++) {
+		area_t a;
+		if (button_rect(ALL[i], &a) && p->x >= a.x1 && p->x <= a.x2 && p->y >= a.y1 && p->y <= a.y2) {
+			return ALL[i];
+		}
+	}
+	return BTN_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// the game
+// ---------------------------------------------------------------------------
+
+static int ground_u(void) { return ground_top * 2; }
+
+static float bob(void) { return sinf((float)bob_deg * (float)M_PI / 180.0f) * BOB_U; }
+
+static int wing_frame(void) {
+	static const int SEQUENCE[4] = {0, 1, 2, 1};
+	return wings == WINGS_REST ? 1 : SEQUENCE[wing_i % 4];
+}
+
+static void wings_set(wings_t w) {
+	wings = w;
+	wing_ms = 0;
+	wing_i = 0;
+}
+
+static void wings_tick(void) {
+	if (wings == WINGS_REST) {
+		return;
+	}
+	wing_ms += ANIM_MS_PER_STEP;
+	if (wing_ms >= (wings == WINGS_FLAP ? FLAP_FRAME_MS : IDLE_FRAME_MS)) {
+		wing_ms = 0;
+		wing_i++;
+		if (wings == WINGS_FLAP && wing_i >= FLAP_FRAMES) {
+			wings = WINGS_REST;
+		}
+	}
+}
+
+// The top of an opening, at least PIPE_MIN_CHANGE_U away from `previous`
+// (negative for none) when the range allows it.
+static int random_gap_top(int previous) {
+	int lo = PIPE_MARGIN_U;
+	int hi = ground_u() - PIPE_MARGIN_U - PIPE_GAP_U;
+	if (hi <= lo) {
+		return lo;
+	}
+	int top = lo;
+	for (int tries = 0; tries < 8; tries++) {
+		top = lo + rand() % (hi - lo + 1);
+		if (previous < 0 || abs(top - previous) >= PIPE_MIN_CHANGE_U) {
+			break;
+		}
+	}
+	return top;
+}
+
+static void pipes_reset(void) {
+	for (int i = 0; i < PIPE_COUNT; i++) {
+		pipes[i].x = panel_w / UNIT_PX + FIRST_PIPE_AHEAD_U + i * PIPE_SPACING_U;
+		pipes[i].gap_top = random_gap_top(i > 0 ? pipes[i - 1].gap_top : -1);
+		pipes[i].scored = false;
+	}
+}
+
+// A point as the left edge of a pipe reaches the left edge of the hit box.
+static void pipes_advance(void) {
+	for (int i = 0; i < PIPE_COUNT; i++) {
+		pipes[i].x -= WORLD_SPEED;
+	}
+	for (int i = 0; i < PIPE_COUNT; i++) {
+		pipe_t *p = &pipes[i];
+		if (p->x + PIPE_W_U < 0) {
+			int last = 0;
+			for (int k = 1; k < PIPE_COUNT; k++) {
+				if (pipes[k].x > pipes[last].x) {
+					last = k;
+				}
+			}
+			p->x = pipes[last].x + PIPE_SPACING_U;
+			p->gap_top = random_gap_top(pipes[last].gap_top);
+			p->scored = false;
+		}
+		if (!p->scored && p->x <= BIRD_LEFT_U) {
+			p->scored = true;
+			score++;
+			sound_play(SFX_POINT);
+		}
+	}
+}
+
+static void randomise_look(void) {
+	int total = 0;
+	for (int i = 0; i < BIRD_COLOURS; i++) {
+		total += BIRD_WEIGHTS[i];
+	}
+	int pick = rand() % total;
+	bird_colour = 0;
+	while (pick >= BIRD_WEIGHTS[bird_colour]) {
+		pick -= BIRD_WEIGHTS[bird_colour];
+		bird_colour++;
+	}
+	bg_index = rand() % 2;
+	widen(bg_wide, &art_bg[bg_index], bg_row0, ground_top);
+	find_flat_rows(&art_bg[bg_index], bg_row0, ground_top, bg_flat);
+	band_top = 0;
+	while (band_top < ground_top && bg_flat[band_top] >= 0) {
+		band_top++;
+	}
+	band_top *= SCALE;
+}
+
+static void bird_reset(void) {
+	bird_v = 0;
+	bird_g = 0;
+	rot_q = 0;
+	rot_r = 0;
+	bob_deg = 0;
+	wings_set(WINGS_IDLE);
+}
+
+static void go_title(void) {
+	randomise_look();
+	look_kept = true;
+	state = ST_TITLE;
+	bird_reset();
+	flash_t = -1;
+}
+
+static void go_ready(void) {
+	if (!look_kept) {
+		randomise_look();
+	}
+	look_kept = false;
+	state = ST_READY;
+	score = 0;
+	new_best = false;
+	bird_reset();
+	bird_c = ready_bird_y_px() / UNIT_PX - BIRD_BOX_U / 2;
+	flash_t = -1;
+	over_t = 0;
+	pipes_reset();
+}
+
+static void fade_to(void (*action)(void)) {
+	fade_t = 0;
+	fade_action = action;
+}
+
+static void flap(void) {
+	if (bird_c >= 0) {
+		bird_v = FLAP_VELOCITY;
+		bird_g = GRAVITY;
+		rot_r = ROT_FLAP_RATE;
+		wings_set(WINGS_FLAP);
+		sound_play(SFX_WING);
+	}
+}
+
+// The bob is where the bird is when the game starts.
+static void start_play(void) {
+	state = ST_PLAY;
+	bird_c = ready_bird_y_px() / UNIT_PX - BIRD_BOX_U / 2 + (int)lroundf(bob());
+	flap();
+}
+
+static int bird_floor(void) { return ground_u() - BIRD_BOX_U; }
+
+static bool bird_on_ground(void) { return bird_c >= bird_floor(); }
+
+static void hit(void) {
+	flash_t = 0;
+	over_t = 0;
+	best_before = best;
+	if (score > best) {
+		best = score;
+		new_best = true;
+		// Saved once the board has settled: a card write is too slow for the
+		// middle of the fall.
+		best_unsaved = true;
+	}
+	state = bird_on_ground() ? ST_OVER : ST_DYING;
+	sound_play(SFX_HIT);
+	if (state == ST_DYING) {
+		sound_play(SFX_DIE);
+	}
+}
+
+static void bird_fall(void) {
+	bird_v += bird_g;
+	if (bird_v > MAX_FALL) {
+		bird_v = MAX_FALL;
+	}
+	bird_c = (int)((float)bird_c + bird_v);
+	if (bird_c > bird_floor()) {
+		bird_c = bird_floor();
+		bird_v = 0;
+		bird_g = 0;
+	}
+	rot_q += rot_r;
+	rot_r += ROT_ACCEL;
+	if (rot_q < ROT_MIN) {
+		rot_q = ROT_MIN;
+	}
+	if (rot_q > ROT_MAX) {
+		rot_q = ROT_MAX;
+	}
+}
+
+// Edges touching count.
+static bool boxes_touch(int x, int y, int w, int h, int px, int py, int pw, int ph) {
+	return x + w >= px && x <= px + pw && y + h >= py && y <= py + ph;
+}
+
+static bool bird_hits_pipe(void) {
+	for (int i = 0; i < PIPE_COUNT; i++) {
+		const pipe_t *p = &pipes[i];
+		if (boxes_touch(BIRD_LEFT_U, bird_c, BIRD_BOX_U, BIRD_BOX_U, p->x, p->gap_top - PIPE_H_U, PIPE_W_U, PIPE_H_U) ||
+			boxes_touch(BIRD_LEFT_U, bird_c, BIRD_BOX_U, BIRD_BOX_U, p->x, p->gap_top + PIPE_GAP_U, PIPE_W_U,
+						PIPE_H_U)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void step(void) {
+	bool moving = state == ST_TITLE || state == ST_READY || state == ST_PLAY;
+	if (moving) {
+		world_px = (world_px + WORLD_SPEED * UNIT_PX) % (GROUND_W * SCALE);
+		bg_px = (bg_px + BG_PX_PER_STEP) % (BG_W * SCALE);
+	}
+	if (state == ST_TITLE || state == ST_READY) {
+		bob_deg = (bob_deg + BOB_DEG_STEP) % 360;
+	}
+	if (state != ST_PAUSED && state != ST_OVER) {
+		wings_tick();
+	}
+
+	switch (state) {
+	case ST_PLAY:
+		pipes_advance();
+		bird_fall();
+		if (bird_on_ground() || bird_hits_pipe() || bird_c < LOST_ABOVE_U) {
+			hit();
+		}
+		break;
+	case ST_DYING:
+		bird_fall();
+		if (bird_on_ground()) {
+			state = ST_OVER;
+		}
+		break;
+	default:
+		break;
+	}
+
+	if (state == ST_OVER) {
+		over_t++;
+		if (over_t == OVER_BOARD_AT) {
+			sound_play(SFX_SWOOSH);
+		}
+	}
+	if (flash_t >= 0 && ++flash_t > FLASH_STEPS) {
+		flash_t = -1;
+	}
+	if (fade_t >= 0) {
+		fade_t++;
+		if (fade_t == FADE_STEPS && fade_action) {
+			fade_action();
+			fade_action = NULL;
+		}
+		if (fade_t >= 2 * FADE_STEPS) {
+			fade_t = -1;
+		}
+	}
+
+	if (state == ST_OVER && over_t == OVER_DONE_AT && best_unsaved) {
+		best_unsaved = false;
+		best_save(best);
+	}
+
+	bool still = (state == ST_OVER && over_t > OVER_DONE_AT) || state == ST_PAUSED;
+	if (!still || flash_t >= 0 || fade_t >= 0) {
+		dirty = true;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the picture
+// ---------------------------------------------------------------------------
+
+static float ease_out(float p) {
+	if (p <= 0) {
+		return 0;
+	}
+	if (p >= 1) {
+		return 1;
+	}
+	float q = 1 - p;
+	return 1 - q * q * q;
+}
+
+static void draw_board(void) {
+	float p = (float)(over_t - OVER_BOARD_AT) / OVER_BOARD_STEPS;
+	if (p <= 0) {
+		return;
+	}
+	int target = layout_px(OVER_BOARD_Y) + layout_shift;
+	int bx = (panel_w - art_board.w * SCALE) / 2;
+	int by = panel_h + (int)lroundf((target - panel_h) * ease_out(p));
+	blit_scaled(&art_board, bx, by, 255);
+
+	int shown = score;
+	int c = over_t - OVER_COUNT_AT;
+	if (c < OVER_COUNT_STEPS) {
+		shown = c <= 0 ? 0 : score * c / OVER_COUNT_STEPS;
+	}
+	int best_shown = new_best ? (shown > best_before ? shown : best_before) : best;
+	int right = bx + BOARD_DIGITS_RIGHT * SCALE;
+
+	draw_number(art_digit_small, DIGIT_GAP_SMALL, shown, right - number_width(art_digit_small, DIGIT_GAP_SMALL, shown),
+				by + BOARD_SCORE_Y * SCALE);
+	draw_number(art_digit_small, DIGIT_GAP_SMALL, best_shown,
+				right - number_width(art_digit_small, DIGIT_GAP_SMALL, best_shown), by + BOARD_BEST_Y * SCALE);
+
+	if (over_t >= OVER_DONE_AT) {
+		int medal = score >= MEDAL_GOLD_AT	   ? MEDAL_GOLD
+					: score >= MEDAL_SILVER_AT ? MEDAL_SILVER
+					: score >= MEDAL_BRONZE_AT ? MEDAL_BRONZE
+											   : -1;
+		if (medal >= 0) {
+			blit_scaled(&art_medal[medal], bx + BOARD_MEDAL_X * SCALE, by + BOARD_MEDAL_Y * SCALE, 255);
+		}
+		if (new_best) {
+			// Left of the printed BEST, on its bottom row.
+			blit_scaled(&art_new, bx + (BOARD_BEST_LABEL_X - BOARD_NEW_GAP - art_new.w) * SCALE,
+				  by + (BOARD_BEST_LABEL_Y + BOARD_BEST_LABEL_H - art_new.h) * SCALE, 255);
+		}
+	}
+}
+
+static void draw_score(void) {
+	int w = number_width(art_digit_big, DIGIT_GAP_BIG, score);
+	draw_number(art_digit_big, DIGIT_GAP_BIG, score, (panel_w - w) / 2, layout_px(SCORE_Y));
+}
+
+static float bird_cx(void) { return (BIRD_LEFT_U + BIRD_BOX_U / 2) * UNIT_PX; }
+
+static float bird_cy(void) {
+	return state == ST_READY ? (float)ready_bird_y_px() + bob() * UNIT_PX
+							 : (float)((bird_c + BIRD_BOX_U / 2) * UNIT_PX);
+}
+
+static bool score_shown(void) { return (state == ST_PLAY || state == ST_DYING) && over_t < OVER_LABEL_AT; }
+
+static bool pipes_shown(void) {
+	return state == ST_PLAY || state == ST_PAUSED || state == ST_DYING || state == ST_OVER;
+}
+
+// Adds `a`, cut to the panel above band_top, when anything is left of it.
+static void add_area(area_t *list, int *n, int x1, int y1, int x2, int y2) {
+	if (x1 < 0) {
+		x1 = 0;
+	}
+	if (y1 < 0) {
+		y1 = 0;
+	}
+	if (x2 > panel_w - 1) {
+		x2 = panel_w - 1;
+	}
+	if (y2 > band_top - 1) {
+		y2 = band_top - 1;
+	}
+	if (x1 <= x2 && y1 <= y2) {
+		list[*n] = (area_t){x1, y1, x2, y2};
+		(*n)++;
+	}
+}
+
+// The bird, the pipes and the running score, as far as they reach above
+// band_top.
+static int moving_areas(area_t *out) {
+	int n = 0;
+	int reach = (int)ceilf(sqrtf((float)(BIRD_W * BIRD_W + BIRD_H * BIRD_H)) * SCALE / 2.0f) + 2;
+	int cx = (int)bird_cx(), cy = (int)bird_cy();
+	add_area(out, &n, cx - reach, cy - reach, cx + reach, cy + reach);
+	if (score_shown()) {
+		int w = number_width(art_digit_big, DIGIT_GAP_BIG, score);
+		int x = (panel_w - w) / 2;
+		add_area(out, &n, x, layout_px(SCORE_Y), x + w - 1, layout_px(SCORE_Y) + art_digit_big[0].h * SCALE - 1);
+	}
+	if (pipes_shown()) {
+		for (int i = 0; i < PIPE_COUNT; i++) {
+			int x = pipes[i].x * UNIT_PX;
+			add_area(out, &n, x, 0, x + PIPE_W * SCALE - 1, band_top - 1);
+		}
+	}
+	return n;
+}
+
+// A whole frame, or with `whole` false one where the background above
+// band_top is painted back only where the moving things were and are, and the
+// one-colour bottom of the ground is left as it is. Everything else is drawn
+// as always: what does not move comes out the same.
+static void render(bool whole) {
+	area_t now[MAX_MOVING];
+	int now_n = moving_areas(now);
+
+	changed_n = 0;
+	if (whole) {
+		changed[changed_n++] = (area_t){0, 0, panel_w - 1, panel_h - 1};
+		draw_background(0);
+	} else {
+		for (int i = 0; i < moved_n + now_n; i++) {
+			const area_t *a = i < moved_n ? &moved[i] : &now[i - moved_n];
+			for (int y = a->y1; y <= a->y2; y++) {
+				fill_span(frame + (size_t)y * panel_w, a->x1, a->x2, (uint16_t)bg_flat[y / SCALE]);
+			}
+			changed[changed_n++] = *a;
+		}
+		changed[changed_n++] =
+			(area_t){0, band_top, panel_w - 1, (ground_top + ground_varied_rows) * SCALE - 1};
+		draw_background(band_top);
+	}
+	memcpy(moved, now, sizeof(now));
+	moved_n = now_n;
+
+	if (pipes_shown()) {
+		int ground = ground_top_px();
+		for (int i = 0; i < PIPE_COUNT; i++) {
+			const pipe_t *p = &pipes[i];
+			blit_scaled_clipped(&art_pipe_upper, p->x * UNIT_PX, (p->gap_top - PIPE_H_U) * UNIT_PX, ground, 255);
+			blit_scaled_clipped(&art_pipe_lower, p->x * UNIT_PX, (p->gap_top + PIPE_GAP_U) * UNIT_PX, ground, 255);
+		}
+	}
+	draw_ground(whole);
+
+	const sprite_t *bird = &art_bird[bird_colour][wing_frame()];
+	// Whole degrees, as the original draws it; anticlockwise here.
+	float bird_turn = (float)-(int)rot_q;
+
+	switch (state) {
+	case ST_TITLE:
+		blit_scaled(&art_logo, (panel_w - art_logo.w * SCALE) / 2, layout_px(TITLE_LOGO_Y) + layout_shift, 255);
+		blit_scaled_turned(bird, panel_w / 2.0f, ground_top_px() / 2.0f + bob() * UNIT_PX, 0);
+		draw_button(BTN_PLAY, &art_play);
+		draw_button(BTN_EXIT, &art_exit);
+		draw_button(BTN_SOUND, sound_on ? &art_sound_on : &art_sound_off);
+		break;
+	case ST_READY:
+		blit_scaled(&art_get_ready, (panel_w - art_get_ready.w * SCALE) / 2, layout_px(READY_LABEL_Y) + layout_shift, 255);
+		blit_scaled(&art_how_to, (panel_w - art_how_to.w * SCALE) / 2, how_to_y(), 255);
+		blit_scaled_turned(bird, bird_cx(), bird_cy(), 0);
+		break;
+	case ST_PLAY:
+	case ST_PAUSED:
+	case ST_DYING:
+	case ST_OVER:
+		blit_scaled_turned(bird, bird_cx(), bird_cy(), bird_turn);
+		if (state == ST_PAUSED) {
+			blit_scaled(&art_get_ready, (panel_w - art_get_ready.w * SCALE) / 2, layout_px(READY_LABEL_Y) + layout_shift, 255);
+		} else if (over_t < OVER_LABEL_AT) {
+			draw_score();
+		}
+		if (over_t >= OVER_LABEL_AT) {
+			float p = (float)(over_t - OVER_LABEL_AT) / OVER_LABEL_STEPS;
+			if (p > 1) {
+				p = 1;
+			}
+			int y = layout_px(OVER_LABEL_Y) + layout_shift - (int)lroundf((1 - ease_out(p)) * 6 * SCALE);
+			blit_scaled(&art_game_over, (panel_w - art_game_over.w * SCALE) / 2, y, (unsigned)lroundf(255 * p));
+		}
+		if (state == ST_OVER) {
+			draw_board();
+			draw_button(BTN_PLAY, &art_play);
+			draw_button(BTN_MENU, &art_menu);
+			draw_button(BTN_SOUND, sound_on ? &art_sound_on : &art_sound_off);
+		}
+		break;
+	}
+
+	if (flash_t >= 0) {
+		wash(0xFFFF, (unsigned)(FLASH_OPA * (FLASH_STEPS - flash_t) / FLASH_STEPS));
+	}
+	if (fade_t >= 0) {
+		int t = fade_t <= FADE_STEPS ? fade_t : 2 * FADE_STEPS - fade_t;
+		wash(0x0000, (unsigned)(255 * t / FADE_STEPS));
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the clock
+// ---------------------------------------------------------------------------
+
+static pthread_t tick_thread;
+static volatile bool tick_running;
+static bool tick_started;
+
+static void tick_posted(void *unused) {
+	(void)unused;
+	if (!active) {
+		return;
+	}
+
+	int64_t now = now_us();
+	int64_t elapsed = now - last_us;
+	last_us = now;
+
+	// One step a tick, so the world moves by the same amount between every
+	// two frames on the panel. A tick late by a frame or two, as when the
+	// mixer has had the processor, still moves one step: the game slows for
+	// that moment rather than jumping. Only a longer gap is made up.
+	int steps = 1;
+	if (elapsed > STALL_US) {
+		steps = 0;
+		if (state == ST_PLAY) {
+			state = ST_PAUSED;
+			dirty = true;
+		}
+	} else if (elapsed * 2 > STEP_US * 3) {
+		stats.late++;
+		if (elapsed >= CATCH_UP_US) {
+			steps = (int)((elapsed + STEP_US / 2) / STEP_US);
+			if (steps > MAX_STEPS_PER_TICK) {
+				steps = MAX_STEPS_PER_TICK;
+			}
+		}
+	}
+	for (int i = 0; i < steps; i++) {
+		step();
+	}
+	stats.ticks++;
+	if (elapsed <= STALL_US && elapsed > stats.longest_gap) {
+		stats.longest_gap = elapsed;
+	}
+
+	if (!dirty) {
+		return;
+	}
+	dirty = false;
+
+	// While the bird is in the air, after one whole frame, the frames are
+	// drawn in part. A change of state takes things off the screen (Get
+	// Ready, the how-to) or puts them on: that frame is drawn whole.
+	static game_state_t drawn_state;
+	bool in_air = (state == ST_READY || state == ST_PLAY || state == ST_DYING) && flash_t < 0 && fade_t < 0;
+	if (state != drawn_state) {
+		frame_whole = false;
+		drawn_state = state;
+	}
+	render(!(in_air && frame_whole));
+	frame_whole = in_air;
+
+	for (int i = 0; i < changed_n; i++) {
+		const area_t *a = &changed[i];
+		morpthis_canvas_invalidate(canvas, a->x1, a->y1, a->x2 - a->x1 + 1, a->y2 - a->y1 + 1);
+	}
+	// On the panel now, in step with the frame just drawn, rather than at the
+	// display timer's own phase. This is what the player's own page did.
+	morpthis_ui_refresh();
+
+	int64_t work = now_us() - now;
+	if (work > stats.longest_work) {
+		stats.longest_work = work;
+	}
+	if (work > STEP_US) {
+		stats.slow++;
+	}
+	stats.work += work;
+	stats.frames++;
+}
+
+static void *tick_main(void *unused) {
+	(void)unused;
+	const struct timespec delay = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
+	while (tick_running) {
+		(void)nanosleep(&delay, NULL);
+		if (tick_running) {
+			morpthis_app_post(tick_posted, NULL);
+		}
+	}
+	return NULL;
+}
+
+static bool tick_start(void) {
+	last_us = now_us();
+	tick_running = true;
+	if (pthread_create(&tick_thread, NULL, tick_main, NULL) != 0) {
+		tick_running = false;
+		return false;
+	}
+	tick_started = true;
+	return true;
+}
+
+static void tick_stop(void) {
+	if (!tick_started) {
+		return;
+	}
+	tick_running = false;
+	pthread_join(tick_thread, NULL);
+	tick_started = false;
+}
+
+// ---------------------------------------------------------------------------
+// input
+// ---------------------------------------------------------------------------
+
+static void game_quit(void);
+
+static void press_at(point_t p) {
+	if (!active || fade_t >= 0) {
+		return;
+	}
+
+	switch (state) {
+	case ST_TITLE:
+	case ST_OVER:
+		pressed_button = button_at(&p);
+		break;
+	case ST_READY:
+		start_play();
+		break;
+	case ST_PAUSED:
+		state = ST_PLAY;
+		flap();
+		break;
+	case ST_PLAY:
+		flap();
+		break;
+	default:
+		break;
+	}
+	dirty = true;
+}
+
+static void release_at(point_t p, bool released) {
+	if (!active || pressed_button == BTN_NONE) {
+		return;
+	}
+	button_t pressed = pressed_button;
+	pressed_button = BTN_NONE;
+	dirty = true;
+
+	if (!released || fade_t >= 0) {
+		return;
+	}
+	if (button_at(&p) != pressed) {
+		return;
+	}
+	switch (pressed) {
+	case BTN_PLAY:
+		sound_play(SFX_SWOOSH);
+		fade_to(go_ready);
+		break;
+	case BTN_MENU:
+		sound_play(SFX_SWOOSH);
+		fade_to(go_title);
+		break;
+	case BTN_SOUND:
+		sound_on = !sound_on;
+		sound_save(sound_on);
+		break;
+	case BTN_EXIT:
+		game_quit();
+		break;
+	default:
+		break;
+	}
+}
+
+static void touch_cb(morpthis_touch_action_t action, morpthis_point_t point, void *user) {
+	(void)user;
+	point_t p = {point.x, point.y};
+	if (action == MORPTHIS_TOUCH_DOWN) {
+		press_at(p);
+	} else if (action == MORPTHIS_TOUCH_UP) {
+		release_at(p, true);
+	} else if (action == MORPTHIS_TOUCH_CANCEL) {
+		release_at(p, false);
+	}
+}
+
+static void button_cb(morpthis_button_t button, morpthis_input_action_t action, void *user) {
+	(void)user;
+	if (action != MORPTHIS_INPUT_PRESS && action != MORPTHIS_INPUT_REPEAT) {
+		return;
+	}
+	if (button == MORPTHIS_BUTTON_BACK) {
+		game_quit();
+	} else if (button == MORPTHIS_BUTTON_PLAY_PAUSE) {
+		// The side key is a tap on the middle of the screen: ready starts,
+		// play flaps. It cannot press the title or board buttons, which is
+		// what a tap at that point would do anyway.
+		point_t p = {panel_w / 2, panel_h / 2};
+		press_at(p);
+		release_at(p, true);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sound
+// ---------------------------------------------------------------------------
 
 #define SOUND_RATE 44100
 #define MIX_FRAMES 441
 #define SOUND_MAX_BYTES (512 * 1024)
-
-// Where the score board puts its contents, in its own 2x pixels.
-#define BOARD_SCORE_Y 34
-#define BOARD_BEST_Y 76
-#define BOARD_DIGITS_RIGHT 206
-#define BOARD_MEDAL_X 24
-#define BOARD_MEDAL_Y 42
-#define BOARD_NEW_X 132
-#define BOARD_NEW_Y 58
-
-typedef enum { ST_TITLE, ST_READY, ST_PLAY, ST_DYING, ST_OVER } state_t;
-typedef enum { WINGS_REST, WINGS_IDLE, WINGS_FLAP } wings_t;
-typedef enum { SFX_WING, SFX_POINT, SFX_HIT, SFX_DIE, SFX_SWOOSH, SFX_KINDS } sfx_t;
-
-typedef struct {
-	int x;
-	int gap_top;
-	bool scored;
-} pipe_t;
 
 typedef struct {
 	int16_t *pcm;
@@ -120,91 +1556,11 @@ typedef struct {
 	int pos;
 } sound_t;
 
-static morpthis_screen_t *screen;
-static int width, height, ground_top;
-static int board_x, board_y;
-
-static state_t state;
-static pipe_t pipes[PIPE_COUNT];
-static int bird_c;
-static float bird_v;
-static int bob_step;
-static wings_t wings;
-static int wings_ms;
-static int wings_i;
-static int colour;
-static bool night;
-static int world_px;
-static int bg_px;
-static int score, best;
-static bool new_best;
-static int shown_frame = -1;
-
-static morpthis_widget_t *bg_day[2], *bg_night[2];
-static morpthis_widget_t *ground[2];
-static morpthis_widget_t *pipe_up[PIPE_COUNT], *pipe_down[PIPE_COUNT];
-static morpthis_widget_t *bird[BIRD_COLOURS][3];
-static morpthis_widget_t *logo, *get_ready, *how_to, *game_over;
-static morpthis_widget_t *board, *new_record;
-static morpthis_widget_t *medals[3];
-static morpthis_widget_t *score_digits[DIGITS_MAX];
-static morpthis_widget_t *over_score_digits[DIGITS_MAX];
-static morpthis_widget_t *over_best_digits[DIGITS_MAX];
-static int score_shown, over_score_shown, over_best_shown;
-static morpthis_widget_t *play_btn, *menu_btn;
-
-static pthread_t tick_thread;
-static volatile bool tick_running;
-static bool tick_started;
-static uint32_t last_ms, step_accum;
-
 static sound_t sounds[SFX_KINDS];
 static pthread_mutex_t sound_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t mixer_thread;
 static volatile bool mixer_stop;
 static bool mixer_started;
-
-static morpthis_widget_t *flash, *fade;
-static int flash_t = -1;
-static int fade_t = -1;
-static void (*fade_action)(void);
-
-static float rot_q, rot_r;
-
-// ---------------------------------------------------------------------------
-// Widgets
-// ---------------------------------------------------------------------------
-
-static morpthis_widget_t *make_image(const char *path, int w, int h) {
-	morpthis_widget_t *widget = morpthis_image_create(screen, path);
-	if (!widget) {
-		morpthis_loge("flappy", "no widget for %s", path);
-		return NULL;
-	}
-	morpthis_widget_set_size(widget, w, h);
-	morpthis_widget_set_visible(widget, false);
-	return widget;
-}
-
-static morpthis_widget_t *make_button(const char *text, int x, int y, int w, int h,
-									  morpthis_click_cb cb) {
-	morpthis_widget_t *button = morpthis_button_create(screen, text, cb, NULL);
-	if (!button) {
-		return NULL;
-	}
-	morpthis_widget_set_pos(button, x, y);
-	morpthis_widget_set_size(button, w, h);
-	morpthis_widget_set_visible(button, false);
-	return button;
-}
-
-// ---------------------------------------------------------------------------
-// Sound
-//
-// The five effects are the original Ogg files decoded to WAV. A thread mixes
-// them into the player's raw output; the write blocks at the rate the DAC
-// plays, which is what paces the loop. Nothing here touches the UI.
-// ---------------------------------------------------------------------------
 
 static const char *const SOUND_FILES[SFX_KINDS] = {
 	[SFX_WING] = "assets/sounds/sfx_wing.wav",
@@ -214,11 +1570,7 @@ static const char *const SOUND_FILES[SFX_KINDS] = {
 	[SFX_SWOOSH] = "assets/sounds/sfx_swooshing.wav",
 };
 
-static uint16_t le16(const uint8_t *p) {
-	return (uint16_t)(p[0] | (p[1] << 8));
-}
-
-static uint32_t le32(const uint8_t *p) {
+static uint32_t wav_u32(const uint8_t *p) {
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
 			((uint32_t)p[3] << 24);
 }
@@ -264,15 +1616,15 @@ static bool wav_load(sound_t *sound, const char *path) {
 	size_t off = 12;
 	while (off + 8 <= (size_t)size) {
 		const uint8_t *id = data + off;
-		uint32_t length = le32(data + off + 4);
+		uint32_t length = wav_u32(data + off + 4);
 		const uint8_t *body = data + off + 8;
 		if (off + 8 + length > (size_t)size) {
 			break;
 		}
 		if (memcmp(id, "fmt ", 4) == 0 && length >= 16) {
-			channels = le16(body + 2);
-			rate = (long)le32(body + 4);
-			bits = le16(body + 14);
+			channels = spr_u16(body + 2);
+			rate = (long)wav_u32(body + 4);
+			bits = spr_u16(body + 14);
 		} else if (memcmp(id, "data", 4) == 0) {
 			pcm = body;
 			bytes = length;
@@ -318,7 +1670,7 @@ static bool wav_load(sound_t *sound, const char *path) {
 }
 
 static void sound_play(sfx_t sfx) {
-	if (sfx < 0 || sfx >= SFX_KINDS) {
+	if ((unsigned)sfx >= SFX_KINDS) {
 		return;
 	}
 	pthread_mutex_lock(&sound_lock);
@@ -330,6 +1682,10 @@ static void sound_play(sfx_t sfx) {
 
 static void mix_into(int32_t *mix) {
 	memset(mix, 0, sizeof(int32_t) * MIX_FRAMES * 2);
+	if (!sound_on) {
+		return;
+	}
+
 	pthread_mutex_lock(&sound_lock);
 	for (int i = 0; i < SFX_KINDS; i++) {
 		sound_t *s = &sounds[i];
@@ -371,8 +1727,8 @@ static void *mixer_main(void *unused) {
 		return NULL;
 	}
 
-	// The output is taken only once the sounds are in memory, so opening it and
-	// stopping the player's track is not a silent pause in the middle of a load.
+	// The output is taken only once the sounds are in memory, so opening it
+	// and stopping the player's track is not a pause in the middle of a load.
 	if (!morpthis_audio_open(SOUND_RATE, 2, 46)) {
 		morpthis_loge("flappy", "no PCM; playing silently");
 		return NULL;
@@ -422,398 +1778,11 @@ static void sound_stop(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Overlays
+// lifecycle
 // ---------------------------------------------------------------------------
 
-static void flash_on(void) {
-	flash_t = 0;
-	// The overlays are older than the score digits, which are created as the
-	// value changes; raising it here keeps the flash over everything.
-	morpthis_widget_raise(flash);
-	morpthis_widget_set_visible(flash, true);
-	morpthis_widget_set_opacity(flash, 86);
-}
-
-static void fade_to(void (*action)(void)) {
-	fade_t = 0;
-	fade_action = action;
-	morpthis_widget_raise(fade);
-	morpthis_widget_set_visible(fade, true);
-	morpthis_widget_set_opacity(fade, 0);
-	sound_play(SFX_SWOOSH);
-}
-
-static int number_width(int value, bool big) {
-	if (value < 0) {
-		value = 0;
-	}
-	if (value > 999) {
-		value = 999;
-	}
-	int count = 1;
-	for (int v = value; v >= 10; v /= 10) {
-		count++;
-	}
-	int digit_w = big ? BIG_W : SMALL_W;
-	int gap = big ? BIG_GAP : SMALL_GAP;
-	return count * digit_w + (count - 1) * gap;
-}
-
-// Replaces the digit widgets. The value is right-aligned on right_x; the
-// widgets are created on top of whatever is already there.
-static void draw_number(morpthis_widget_t **digits, int *shown, int value, int right_x, int y,
-						bool big) {
-	for (int i = 0; i < DIGITS_MAX; i++) {
-		if (digits[i]) {
-			morpthis_widget_destroy(digits[i]);
-			digits[i] = NULL;
-		}
-	}
-	*shown = 0;
-
-	if (value < 0) {
-		value = 0;
-	}
-	if (value > 999) {
-		value = 999;
-	}
-	int count = 1;
-	for (int v = value; v >= 10; v /= 10) {
-		count++;
-	}
-
-	int digit_w = big ? BIG_W : SMALL_W;
-	int digit_h = big ? BIG_H : SMALL_H;
-	int gap = big ? BIG_GAP : SMALL_GAP;
-	int x = right_x - (count * digit_w + (count - 1) * gap);
-
-	int place = 1;
-	for (int i = count - 1; i >= 0; i--) {
-		int digit = (value / place) % 10;
-		place *= 10;
-
-		char path[48];
-		snprintf(path, sizeof(path), big ? "assets/score-game-%d.png" : "assets/score-%d.png",
-				 digit);
-		morpthis_widget_t *widget = make_image(path, digit_w, digit_h);
-		if (!widget) {
-			continue;
-		}
-		morpthis_widget_set_pos(widget, x + i * (digit_w + gap), y);
-		morpthis_widget_set_visible(widget, true);
-		digits[i] = widget;
-	}
-	*shown = count;
-}
-
-static void draw_score(void) {
-	draw_number(score_digits, &score_shown, score, (width + number_width(score, true)) / 2, 10,
-				true);
-}
-
-static void draw_board_numbers(void) {
-	int right = board_x + BOARD_DIGITS_RIGHT;
-	draw_number(over_score_digits, &over_score_shown, score, right, board_y + BOARD_SCORE_Y,
-				false);
-	draw_number(over_best_digits, &over_best_shown, best, right, board_y + BOARD_BEST_Y, false);
-}
-
-// ---------------------------------------------------------------------------
-// The bird
-// ---------------------------------------------------------------------------
-
-static int wing_frame(void) {
-	static const int SEQUENCE[4] = {0, 1, 2, 1};
-	return wings == WINGS_REST ? 1 : SEQUENCE[wings_i % 4];
-}
-
-static void wings_set(wings_t w) {
-	wings = w;
-	wings_ms = 0;
-	wings_i = 0;
-}
-
-static void wings_tick(void) {
-	if (wings == WINGS_REST) {
-		return;
-	}
-	wings_ms += 15;
-	if (wings_ms >= (wings == WINGS_FLAP ? 33 : 100)) {
-		wings_ms = 0;
-		wings_i++;
-		if (wings == WINGS_FLAP && wings_i >= 12) {
-			wings = WINGS_REST;
-		}
-	}
-}
-
-static void bird_show(int frame) {
-	for (int c = 0; c < BIRD_COLOURS; c++) {
-		for (int f = 0; f < 3; f++) {
-			morpthis_widget_set_visible(bird[c][f], c == colour && f == frame);
-		}
-	}
-	shown_frame = frame;
-}
-
-static void bird_refresh(void) {
-	bird_show(wing_frame());
-}
-
-static void bird_place(void) {
-	int x = BIRD_LEFT - (BIRD_W - BIRD_BOX) / 2;
-	int y = bird_c - (BIRD_H - BIRD_BOX) / 2;
-	for (int f = 0; f < 3; f++) {
-		morpthis_widget_set_pos(bird[colour][f], x, y);
-		morpthis_widget_set_rotation(bird[colour][f], (int)rot_q);
-	}
-}
-
-static int bird_floor(void) {
-	return ground_top - BIRD_BOX;
-}
-
-static bool bird_on_ground(void) {
-	return bird_c >= bird_floor();
-}
-
-static void bird_reset(void) {
-	bird_c = READY_TOP;
-	bird_v = 0;
-	bob_step = 0;
-	rot_q = 0;
-	rot_r = 0;
-	wings_set(WINGS_IDLE);
-}
-
-// A triangle standing in for the original sine: four pixels each way, one
-// cycle a little over a second.
-static int bob(void) {
-	int phase = bob_step % 64;
-	int triangle = phase < 32 ? phase : 64 - phase;
-	return (triangle - 16) / 4;
-}
-
-static void flap(void) {
-	if (bird_c >= 0) {
-		bird_v = FLAP_VELOCITY;
-		rot_r = -10.0f;
-		wings_set(WINGS_FLAP);
-		sound_play(SFX_WING);
-	}
-}
-
-static void bird_fall(void) {
-	bird_v += GRAVITY;
-	if (bird_v > MAX_FALL) {
-		bird_v = MAX_FALL;
-	}
-	bird_c = (int)((float)bird_c + bird_v);
-	if (bird_c > bird_floor()) {
-		bird_c = bird_floor();
-		bird_v = 0;
-	}
-
-	// A flap sets the turn rate nose-up; it grows a step at a time, so the
-	// bird levels out and then points at the ground as it falls.
-	rot_q += rot_r;
-	rot_r += 0.4f;
-	if (rot_q < -20.0f) {
-		rot_q = -20.0f;
-	}
-	if (rot_q > 90.0f) {
-		rot_q = 90.0f;
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Pipes
-// ---------------------------------------------------------------------------
-
-static int random_gap_top(int previous) {
-	int lo = PIPE_MARGIN;
-	int hi = ground_top - PIPE_MARGIN - PIPE_GAP;
-	if (hi <= lo) {
-		return lo;
-	}
-	int top = lo;
-	for (int tries = 0; tries < 8; tries++) {
-		top = lo + rand() % (hi - lo + 1);
-		if (previous < 0 || abs(top - previous) >= PIPE_MIN_CHANGE) {
-			break;
-		}
-	}
-	return top;
-}
-
-static void pipes_reset(void) {
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		pipes[i].x = width + FIRST_PIPE_AHEAD + i * PIPE_SPACING;
-		pipes[i].gap_top = random_gap_top(i > 0 ? pipes[i - 1].gap_top : -1);
-		pipes[i].scored = false;
-	}
-}
-
-static void pipes_place(void) {
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		morpthis_widget_set_pos(pipe_up[i], pipes[i].x, pipes[i].gap_top - PIPE_H);
-		morpthis_widget_set_pos(pipe_down[i], pipes[i].x, pipes[i].gap_top + PIPE_GAP);
-	}
-}
-
-static void pipes_advance(void) {
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		pipes[i].x -= 2;
-	}
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		pipe_t *p = &pipes[i];
-		if (p->x + PIPE_W < 0) {
-			int last = 0;
-			for (int k = 1; k < PIPE_COUNT; k++) {
-				if (pipes[k].x > pipes[last].x) {
-					last = k;
-				}
-			}
-			p->x = pipes[last].x + PIPE_SPACING;
-			p->gap_top = random_gap_top(pipes[last].gap_top);
-			p->scored = false;
-		}
-		if (!p->scored && p->x <= BIRD_LEFT) {
-			p->scored = true;
-			score++;
-			sound_play(SFX_POINT);
-			draw_score();
-		}
-	}
-	pipes_place();
-}
-
-// Edges touching count, as in the original.
-static bool boxes_touch(int x, int y, int w, int h, int px, int py, int pw, int ph) {
-	return x + w >= px && x <= px + pw && y + h >= py && y <= py + ph;
-}
-
-static bool bird_hits_pipe(void) {
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		const pipe_t *p = &pipes[i];
-		if (boxes_touch(BIRD_LEFT, bird_c, BIRD_BOX, BIRD_BOX, p->x, p->gap_top - PIPE_H, PIPE_W,
-						PIPE_H) ||
-			boxes_touch(BIRD_LEFT, bird_c, BIRD_BOX, BIRD_BOX, p->x, p->gap_top + PIPE_GAP,
-						PIPE_W, PIPE_H)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
-// The background is 288 px wide and scrolls one pixel a step; the ground is
-// 336 and scrolls two. Two copies of each cover any offset.
-static void scroll_place(void) {
-	int bx = -(bg_px % BG_W);
-	int gx = -(world_px % GROUND_W);
-	morpthis_widget_set_pos(bg_day[0], bx, 0);
-	morpthis_widget_set_pos(bg_day[1], bx + BG_W, 0);
-	morpthis_widget_set_pos(bg_night[0], bx, 0);
-	morpthis_widget_set_pos(bg_night[1], bx + BG_W, 0);
-	morpthis_widget_set_pos(ground[0], gx, ground_top);
-	morpthis_widget_set_pos(ground[1], gx + GROUND_W, ground_top);
-}
-
-static int medal_for(int value) {
-	if (value >= MEDAL_GOLD_AT) {
-		return 2;
-	}
-	if (value >= MEDAL_SILVER_AT) {
-		return 1;
-	}
-	if (value >= MEDAL_BRONZE_AT) {
-		return 0;
-	}
-	return -1;
-}
-
-static void place_buttons(void) {
-	if (state == ST_TITLE) {
-		morpthis_widget_set_pos(play_btn, (width - 120) / 2, 104);
-		morpthis_widget_set_size(play_btn, 120, 40);
-	} else if (state == ST_OVER) {
-		morpthis_widget_set_pos(play_btn, 8, 168);
-		morpthis_widget_set_size(play_btn, 110, 36);
-		morpthis_widget_set_pos(menu_btn, width - 118, 168);
-		morpthis_widget_set_size(menu_btn, 110, 36);
-	}
-}
-
-static void apply_visibility(void) {
-	const bool title = state == ST_TITLE;
-	const bool ready = state == ST_READY;
-	const bool playing = state == ST_PLAY || state == ST_DYING;
-	const bool over = state == ST_OVER;
-
-	for (int i = 0; i < 2; i++) {
-		morpthis_widget_set_visible(bg_day[i], !night);
-		morpthis_widget_set_visible(bg_night[i], night);
-		morpthis_widget_set_visible(ground[i], true);
-	}
-
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		morpthis_widget_set_visible(pipe_up[i], playing || over);
-		morpthis_widget_set_visible(pipe_down[i], playing || over);
-	}
-
-	morpthis_widget_set_visible(logo, title);
-	morpthis_widget_set_visible(get_ready, ready);
-	morpthis_widget_set_visible(how_to, ready);
-
-	place_buttons();
-	morpthis_widget_set_visible(play_btn, title || over);
-	morpthis_widget_set_visible(menu_btn, over);
-
-	morpthis_widget_set_visible(game_over, over);
-	morpthis_widget_set_visible(board, over);
-	morpthis_widget_set_visible(new_record, over && new_best);
-	int medal = over ? medal_for(score) : -1;
-	for (int i = 0; i < 3; i++) {
-		morpthis_widget_set_visible(medals[i], i == medal);
-	}
-
-	for (int i = 0; i < DIGITS_MAX; i++) {
-		morpthis_widget_set_visible(score_digits[i], playing && i < score_shown);
-		morpthis_widget_set_visible(over_score_digits[i], over && i < over_score_shown);
-		morpthis_widget_set_visible(over_best_digits[i], over && i < over_best_shown);
-	}
-
-	if (ready || playing || over) {
-		bird_refresh();
-	} else {
-		for (int c = 0; c < BIRD_COLOURS; c++) {
-			for (int f = 0; f < 3; f++) {
-				morpthis_widget_set_visible(bird[c][f], false);
-			}
-		}
-		shown_frame = -1;
-	}
-}
-
-static void pick_look(void) {
-	static const int WEIGHTS[BIRD_COLOURS] = {10, 10, 10, 10, 10, 10, 3, 1};
-	int total = 0;
-	for (int i = 0; i < BIRD_COLOURS; i++) {
-		total += WEIGHTS[i];
-	}
-	int pick = rand() % total;
-	colour = 0;
-	while (colour < BIRD_COLOURS - 1 && pick >= WEIGHTS[colour]) {
-		pick -= WEIGHTS[colour];
-		colour++;
-	}
-	night = (rand() & 1) != 0;
-}
-
+// The best score and the sound switch are the only two things the game keeps
+// between runs. Two small files beside the app, written once a game has ended.
 static int best_load(void) {
 	char text[32];
 	size_t got = 0;
@@ -838,390 +1807,115 @@ static void best_save(int value) {
 	}
 }
 
-static void enter_over(void) {
-	state = ST_OVER;
-	draw_board_numbers();
-	apply_visibility();
-
-	// The digits were created after the overlays; put the overlay back on top
-	// before its remaining steps are drawn.
-	if (flash_t >= 0) {
-		morpthis_widget_raise(flash);
+static bool sound_load(void) {
+	char text[8];
+	size_t got = 0;
+	if (morpthis_fs_read_all("sound.txt", text, sizeof(text), &got) <= 0) {
+		return true;
 	}
-	if (fade_t >= 0) {
-		morpthis_widget_raise(fade);
-	}
-
-	if (new_best) {
-		morpthis_toast("New best!");
-	}
+	return text[0] != '0';
 }
 
-static void hit(void) {
-	flash_on();
-	sound_play(SFX_HIT);
+static void sound_save(bool on) { morpthis_fs_write_all("sound.txt", on ? "1\n" : "0\n", 2); }
 
-	if (score > best) {
-		best = score;
-		new_best = true;
+static void free_world(void) {
+	free(bg_wide);
+	bg_wide = NULL;
+	free(ground_wide);
+	ground_wide = NULL;
+	art_free();
+}
+
+static void game_quit(void) {
+	if (!active) {
+		morpthis_app_quit();
+		return;
+	}
+	active = false;
+
+	sound_stop();
+	tick_stop();
+
+	if (best_unsaved) {
+		best_unsaved = false;
 		best_save(best);
 	}
-	if (bird_on_ground()) {
-		enter_over();
-	} else {
-		state = ST_DYING;
-		sound_play(SFX_DIE);
+
+	if (stats.frames > 0) {
+		morpthis_logi("flappy",
+					  "%u frames in %.1f s, %u late ticks, longest gap %.1f ms; frames %.1f ms on average, %u over a "
+					  "step, longest %.1f ms; score %d, best %d",
+					  stats.frames, (double)(now_us() - stats.since) / 1e6, stats.late,
+					  (double)stats.longest_gap / 1000.0, (double)stats.work / stats.frames / 1000.0, stats.slow,
+					  (double)stats.longest_work / 1000.0, score, best);
 	}
+
+	free_world();
+	morpthis_app_quit();
 }
 
-static void go_title(void) {
-	state = ST_TITLE;
-	pick_look();
-	bird_reset();
-	apply_visibility();
-}
-
-static void start_ready(bool new_look) {
-	if (new_look) {
-		pick_look();
-	}
-	state = ST_READY;
-	score = 0;
-	new_best = false;
-	bird_reset();
-	pipes_reset();
-	pipes_place();
-	draw_score();
-	apply_visibility();
-
-	// draw_score() created widgets after the fade overlay was raised.
-	if (fade_t >= 0) {
-		morpthis_widget_raise(fade);
-	}
-}
-
-static void start_play(void) {
-	state = ST_PLAY;
-	flap();
-	apply_visibility();
-}
-
-// Fade actions take no arguments; these are the callbacks the overlay runs
-// halfway through.
-static void fade_start_title(void) {
-	start_ready(false);
-}
-
-static void fade_start_new(void) {
-	start_ready(true);
-}
-
-static void fade_go_title(void) {
-	go_title();
-}
-
-static void step(void) {
-	const bool moving = state == ST_TITLE || state == ST_READY || state == ST_PLAY;
-	if (moving) {
-		world_px = (world_px + 2) % GROUND_W;
-		bg_px = (bg_px + 1) % BG_W;
-	}
-	if (state == ST_TITLE || state == ST_READY) {
-		bob_step = (bob_step + 1) % 64;
-	}
-	if (state != ST_OVER) {
-		wings_tick();
-	}
-
-	switch (state) {
-	case ST_PLAY:
-		pipes_advance();
-		bird_fall();
-		if (bird_on_ground() || bird_hits_pipe() || bird_c < LOST_ABOVE) {
-			hit();
-		}
-		break;
-	case ST_DYING:
-		bird_fall();
-		if (bird_on_ground()) {
-			enter_over();
-		}
-		break;
-	default:
-		break;
-	}
-
-	if (state == ST_READY) {
-		bird_c = READY_TOP + bob();
-	}
-
-	if (flash_t >= 0) {
-		flash_t++;
-		if (flash_t > FLASH_STEPS) {
-			flash_t = -1;
-			morpthis_widget_set_visible(flash, false);
-		}
-	}
-
-	if (fade_t >= 0) {
-		fade_t++;
-		if (fade_t == FADE_STEPS && fade_action) {
-			fade_action();
-			fade_action = NULL;
-		}
-
-		int opacity;
-		if (fade_t <= FADE_STEPS) {
-			opacity = fade_t * 100 / FADE_STEPS;
-		} else {
-			opacity = (2 * FADE_STEPS - fade_t) * 100 / FADE_STEPS;
-		}
-		if (opacity < 0) {
-			opacity = 0;
-		}
-		if (opacity > 100) {
-			opacity = 100;
-		}
-		morpthis_widget_set_opacity(fade, opacity);
-
-		if (fade_t >= 2 * FADE_STEPS) {
-			fade_t = -1;
-			morpthis_widget_set_visible(fade, false);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Input
-// ---------------------------------------------------------------------------
-
-static void on_tap(void) {
-	if (fade_t >= 0) {
-		return;
-	}
-
-	switch (state) {
-	case ST_TITLE:
-		fade_to(fade_start_title);
-		break;
-	case ST_READY:
-		start_play();
-		break;
-	case ST_PLAY:
-		flap();
-		break;
-	case ST_OVER:
-		fade_to(fade_start_new);
-		break;
-	default:
-		break;
-	}
-}
-
-static void play_clicked(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
-	if (fade_t >= 0) {
-		return;
-	}
-	if (state == ST_TITLE) {
-		fade_to(fade_start_title);
-	} else if (state == ST_OVER) {
-		fade_to(fade_start_new);
-	}
-}
-
-static void menu_clicked(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
-	if (fade_t >= 0) {
-		return;
-	}
-	fade_to(fade_go_title);
-}
-
-// ---------------------------------------------------------------------------
-// The clock
-// ---------------------------------------------------------------------------
-
-static void tick_stop(void) {
-	if (!tick_started) {
-		return;
-	}
-	tick_running = false;
-	pthread_join(tick_thread, NULL);
-	tick_started = false;
-}
-
-static void tick_cb(void *unused) {
-	(void)unused;
-
-	uint32_t now = morpthis_app_time_ms();
-	uint32_t elapsed = now - last_ms;
-	last_ms = now;
-
-	if (elapsed > STALL_MS) {
-		// The panel was dark or the GUI was busy elsewhere. A game in
-		// progress waits rather than making the jump up in one frame.
-		step_accum = 0;
-		return;
-	}
-
-	step_accum += elapsed;
-	int steps = 0;
-	while (step_accum >= STEP_MS && steps < MAX_STEPS) {
-		step();
-		step_accum -= STEP_MS;
-		steps++;
-	}
-	if (step_accum >= STEP_MS) {
-		step_accum = 0;
-	}
-	if (steps == 0) {
-		return;
-	}
-
-	if (state == ST_TITLE || state == ST_READY || state == ST_PLAY) {
-		scroll_place();
-	}
-	if (state != ST_TITLE) {
-		bird_place();
-	}
-	if (state != ST_OVER && wing_frame() != shown_frame) {
-		bird_refresh();
-	}
-}
-
-static void *tick_main(void *unused) {
-	(void)unused;
-	const struct timespec delay = {.tv_sec = 0, .tv_nsec = 16 * 1000 * 1000L};
-	while (tick_running) {
-		(void)nanosleep(&delay, NULL);
-		if (!tick_running) {
-			break;
-		}
-		morpthis_app_post(tick_cb, NULL);
-	}
-	return NULL;
-}
-
-static bool tick_start(void) {
-	last_ms = morpthis_app_time_ms();
-	step_accum = 0;
-	tick_running = true;
-	if (pthread_create(&tick_thread, NULL, tick_main, NULL) != 0) {
-		tick_running = false;
+static bool game_setup(void) {
+	panel_w = morpthis_ui_width();
+	panel_h = morpthis_ui_height();
+	if (panel_w < 200 || panel_h < 280) {
 		return false;
 	}
-	tick_started = true;
-	return true;
-}
 
-static void button_cb(morpthis_button_t button, morpthis_input_action_t action, void *user) {
-	(void)user;
-	if (action != MORPTHIS_INPUT_PRESS && action != MORPTHIS_INPUT_REPEAT) {
-		return;
-	}
-	if (button == MORPTHIS_BUTTON_BACK) {
-		// The player quits the app right after delivering BACK. Both threads must
-		// be gone before the shared object is unloaded. Quitting here too keeps
-		// the host runtime, which only delivers the button, in step with it.
-		sound_stop();
-		tick_stop();
-		morpthis_app_quit();
-	} else if (button == MORPTHIS_BUTTON_PLAY_PAUSE) {
-		on_tap();
-	}
-}
-
-static void touch_cb(morpthis_touch_action_t action, morpthis_point_t point, void *user) {
-	(void)point;
-	(void)user;
-	if (action == MORPTHIS_TOUCH_DOWN) {
-		on_tap();
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-static bool build(void) {
-	width = morpthis_ui_width();
-	height = morpthis_ui_height();
-	if (width < 120 || height < 160) {
-		return false;
-	}
-	ground_top = height - GROUND_H;
+	game_scale = panel_w < 320 ? 2 : 4;
+	view_h = panel_h / SCALE;
+	ground_top = view_h - GROUND_H;
+	layout_shift = (panel_h - 180 * SCALE) / 2;
+	// The background stands on the bottom of the panel.
+	bg_row0 = BG_H - view_h;
 
 	screen = morpthis_screen_create("Flappy Bird");
 	if (!screen) {
 		return false;
 	}
-
-	for (int i = 0; i < 2; i++) {
-		bg_day[i] = make_image("assets/bg-day.png", BG_W, BG_H);
-		bg_night[i] = make_image("assets/bg-night.png", BG_W, BG_H);
+	canvas = morpthis_canvas_create(screen, panel_w, panel_h);
+	if (!canvas) {
+		return false;
 	}
-	for (int i = 0; i < 2; i++) {
-		ground[i] = make_image("assets/ground.png", GROUND_W, GROUND_H);
-		morpthis_widget_set_pos(ground[i], 0, ground_top);
-	}
-
-	for (int i = 0; i < PIPE_COUNT; i++) {
-		pipe_up[i] = make_image("assets/pipe-up.png", PIPE_W, PIPE_H);
-		pipe_down[i] = make_image("assets/pipe-down.png", PIPE_W, PIPE_H);
+	morpthis_widget_set_pos(canvas, 0, 0);
+	frame = morpthis_canvas_buffer(canvas);
+	if (!frame) {
+		return false;
 	}
 
-	static const char *const COLOURS[BIRD_COLOURS] = {"yellow", "red",  "blue", "green",
-													  "peach",  "purple", "cow",  "rare"};
-	char path[64];
-	for (int c = 0; c < BIRD_COLOURS; c++) {
-		for (int f = 0; f < 3; f++) {
-			snprintf(path, sizeof(path), "assets/bird-%s-0%d.png", COLOURS[c], f + 1);
-			bird[c][f] = make_image(path, BIRD_W, BIRD_H);
+	bg_wide = malloc((size_t)ground_top * BG_W * SCALE * sizeof(uint16_t));
+	ground_wide = malloc((size_t)GROUND_H * GROUND_W * SCALE * sizeof(uint16_t));
+	if (!bg_wide || !ground_wide || !art_load()) {
+		free_world();
+		return false;
+	}
+
+	best = best_load();
+	sound_on = sound_load();
+	srand((unsigned)now_us());
+	widen(ground_wide, &art_ground, 0, GROUND_H);
+	find_flat_rows(&art_ground, 0, GROUND_H, ground_flat);
+	ground_varied_rows = 0;
+	for (int y = 0; y < GROUND_H; y++) {
+		if (ground_flat[y] < 0) {
+			ground_varied_rows = y + 1;
 		}
 	}
 
-	logo = make_image("assets/logo.png", LOGO_W, LOGO_H);
-	morpthis_widget_set_pos(logo, (width - LOGO_W) / 2, 16);
+	world_px = bg_px = 0;
+	go_title();
+	// Opens out of black.
+	fade_t = FADE_STEPS;
+	fade_action = NULL;
+	render(true);
+	morpthis_canvas_invalidate(canvas, 0, 0, panel_w, panel_h);
 
-	get_ready = make_image("assets/get-ready.png", READY_W, READY_H);
-	morpthis_widget_set_pos(get_ready, (width - READY_W) / 2, 14);
-
-	how_to = make_image("assets/how-to.png", HOWTO_W, HOWTO_H);
-	morpthis_widget_set_pos(how_to, (width - HOWTO_W) / 2, ground_top - HOWTO_H - 8);
-
-	game_over = make_image("assets/game-over.png", OVER_W, OVER_H);
-	morpthis_widget_set_pos(game_over, (width - OVER_W) / 2, 2);
-
-	board_x = (width - BOARD_W) / 2;
-	board_y = 46;
-	board = make_image("assets/score-board.png", BOARD_W, BOARD_H);
-	morpthis_widget_set_pos(board, board_x, board_y);
-
-	new_record = make_image("assets/new-record-label.png", NEW_W, NEW_H);
-	morpthis_widget_set_pos(new_record, board_x + BOARD_NEW_X, board_y + BOARD_NEW_Y);
-
-	medals[0] = make_image("assets/medal-bronze.png", MEDAL_W, MEDAL_H);
-	medals[1] = make_image("assets/medal-silver.png", MEDAL_W, MEDAL_H);
-	medals[2] = make_image("assets/medal-gold.png", MEDAL_W, MEDAL_H);
-	for (int i = 0; i < 3; i++) {
-		morpthis_widget_set_pos(medals[i], board_x + BOARD_MEDAL_X, board_y + BOARD_MEDAL_Y);
-	}
-
-	play_btn = make_button("Play", (width - 120) / 2, 104, 120, 40, play_clicked);
-	menu_btn = make_button("Menu", width - 118, 168, 110, 36, menu_clicked);
-
-	// Last, so they start above the rest; flash_on() and fade_to() raise them
-	// again after their value has changed the score digits' order.
-	flash = make_image("assets/white.png", width, height);
-	morpthis_widget_set_pos(flash, 0, 0);
-	fade = make_image("assets/black.png", width, height);
-	morpthis_widget_set_pos(fade, 0, 0);
-
-	best = best_load();
-	scroll_place();
+	active = true;
+	pressed_button = BTN_NONE;
+	frame_whole = false;
+	moved_n = 0;
+	memset(&stats, 0, sizeof(stats));
+	stats.since = now_us();
+	dirty = true;
 	return true;
 }
 
@@ -1229,26 +1923,22 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	(void)app;
 	morpthis_logi("flappy", "starting");
 
-	srand((unsigned)time(NULL) ^ (unsigned)morpthis_app_time_ms());
-
-	if (!build()) {
-		morpthis_loge("flappy", "could not build the screen");
-		morpthis_toast("Flappy Bird could not start");
+	if (!game_setup()) {
+		morpthis_loge("flappy", "missing artwork or no memory");
+		morpthis_toast("Flappy Bird is missing its files");
 		return 1;
 	}
 
 	morpthis_input_set_button_cb(button_cb, NULL);
 	morpthis_input_set_touch_cb(touch_cb, NULL);
 
-	go_title();
 	morpthis_screen_load(screen);
 
 	if (!tick_start()) {
-		morpthis_loge("flappy", "could not start the game clock");
-		morpthis_toast("Flappy Bird could not start");
+		morpthis_loge("flappy", "could not start the clock");
+		free_world();
 		return 1;
 	}
-
 	if (!sound_start()) {
 		morpthis_loge("flappy", "could not start the mixer; playing silently");
 	}

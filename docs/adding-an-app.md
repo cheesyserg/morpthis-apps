@@ -36,17 +36,27 @@ letters, digits, `.`, `_` and `-`; no spaces.
 | `icon` | no | Relative, square; 64×64 or 128×128. |
 | `description` | no | One line, no trailing period. |
 | `min_player` | no | Non-negative; 0 means no requirement. |
+| `category` | no | `app` (default) or `game`. Games get the whole panel. |
 | `tier` | no | `light` (default) or `heavy`. Heavy releases playback and caches first. |
 
 `entry` and `icon` are refused by the player if they are absolute or contain
 `..` or a backslash. Keep them plain file names.
 
+`category` is `app` for anything that uses the player's screens and widgets:
+the title row, the chevron and the swipe-back gesture stay, and
+`morpthis_ui_height()` is the content area below the title. `game` is for an
+app that draws its own frames on a canvas and owns the panel: no title row, no
+chevron, no edge swipe, and `morpthis_ui_height()` is the full display. A game
+is left through a control of its own. Its only chrome is a swipe down from the
+top edge, which peeks at the status bar for a second; a second swipe while the
+bar is up opens the control centre.
+
 `tier` is the memory contract. `light` is the normal case: the player keeps
 playing, keeps its caches, and the app has to fit in what is free. `heavy`
 stops playback, closes the decoder and PCM, releases the SQLite page caches and
 trims the heap before the app starts; use it only for an app that genuinely
-needs the room. It is still an in-process app, with the player's UI and back
-gesture.
+needs the room. Tier and category are independent: a heavy app still has the
+player's chrome unless it asks for `game`, and a game can be light.
 
 ## 3. The Makefile
 

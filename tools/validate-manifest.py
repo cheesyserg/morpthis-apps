@@ -24,11 +24,13 @@ KNOWN_FIELDS = {
     "description",
     "min_player",
     "tier",
+    "category",
 }
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 APP_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 TIERS = {"light", "heavy"}
+CATEGORIES = {"app", "game"}
 
 
 def safe_relative(path: str) -> bool:
@@ -121,6 +123,10 @@ def check_app(app_dir: str) -> tuple[list[str], list[str]]:
     tier = manifest.get("tier", "light")
     if not isinstance(tier, str) or tier not in TIERS:
         errors.append(f"{manifest_path}: tier must be light or heavy")
+
+    category = manifest.get("category", "app")
+    if not isinstance(category, str) or category not in CATEGORIES:
+        errors.append(f"{manifest_path}: category must be app or game")
 
     for field in sorted(set(manifest) - KNOWN_FIELDS):
         warnings.append(f"{manifest_path}: unknown field {field!r} is ignored by the player")

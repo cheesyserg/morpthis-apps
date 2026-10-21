@@ -99,6 +99,8 @@ in-process; tools still run as a child process.
 - `icon` is `icon.png` (64×64 or 128×128).
 - `description` is one sentence, no trailing period.
 - `min_player` is the oldest player build the app was tested on.
+- `category` is `app` (the default) or `game`. A game gets the whole panel:
+  no title row, no chevron, no swipe-back.
 - `tier` is `light` (the default) or `heavy`. Light apps keep the player's
   playback and caches; heavy apps release them before loading and are for the
   rare app that needs every kilobyte.

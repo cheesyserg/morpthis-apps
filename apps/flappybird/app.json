@@ -5,6 +5,7 @@
   "entry": "flappybird",
   "icon": "icon.png",
   "description": "Tap to flap through the pipes",
+  "category": "game",
   "tier": "heavy",
   "min_player": 1
 }
