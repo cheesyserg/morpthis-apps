@@ -50,4 +50,10 @@ void stream_player_shutdown(void);
 int stream_player_position_ms(void);
 int stream_player_duration_ms(void);
 
+// What the current stream really opened at. Zero/false until the decoder has
+// read the header and the output is open (STREAM_EVENT_STARTED).
+int stream_player_rate(void);
+int stream_player_bits(void);
+bool stream_player_flac(void);
+
 #endif

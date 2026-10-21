@@ -1,7 +1,7 @@
 {
   "id": "subsonic",
   "name": "Subsonic",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "entry": "subsonic",
   "icon": "icon.png",
   "description": "Browse, search and stream MP3 or lossless FLAC (up to 24-bit) from Subsonic/Gonic, with cover art and a now-playing page",

@@ -50,6 +50,12 @@ typedef struct {
 
 	int position_ms;
 	int duration_ms;
+
+	// What the decoder actually opened: the page shows this rather than the
+	// quality that was requested, because a server may ignore the request.
+	int source_rate;
+	int source_bits;
+	bool source_flac;
 } player_t;
 
 static player_t player;
@@ -317,6 +323,9 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	pthread_mutex_lock(&player.lock);
 	player.position_ms = 0;
 	player.duration_ms = track->duration_ms;
+	player.source_rate = rate;
+	player.source_bits = source_bits;
+	player.source_flac = flac_stream;
 	bool start_paused = player.paused;
 	pthread_mutex_unlock(&player.lock);
 	morpthis_audio_set_playing(!start_paused);
@@ -555,4 +564,25 @@ int stream_player_duration_ms(void) {
 	int duration = player.duration_ms;
 	pthread_mutex_unlock(&player.lock);
 	return duration;
+}
+
+int stream_player_rate(void) {
+	pthread_mutex_lock(&player.lock);
+	int rate = player.source_rate;
+	pthread_mutex_unlock(&player.lock);
+	return rate;
+}
+
+int stream_player_bits(void) {
+	pthread_mutex_lock(&player.lock);
+	int bits = player.source_bits;
+	pthread_mutex_unlock(&player.lock);
+	return bits;
+}
+
+bool stream_player_flac(void) {
+	pthread_mutex_lock(&player.lock);
+	bool flac = player.source_flac;
+	pthread_mutex_unlock(&player.lock);
+	return flac;
 }

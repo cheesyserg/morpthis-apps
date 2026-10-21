@@ -79,8 +79,11 @@ one level.
 
 While a track is loaded, the status line at the top of the library becomes a
 mini-player row with the cover, title and artist. Tapping it opens the
-now-playing page: a large cover, title and artist, elapsed/total time, and the
-player's own previous, play/pause and next glyphs. The play glyph in the
+now-playing page, laid out like the player's own V1 page: a large centred
+sleeve over a deck with the title and artist left-aligned, the bit depth,
+sample rate and codec at the right, a thin progress bar with elapsed and total
+under its ends and the queue position between them, and the transport centred
+with the queue on the left and More on the right. The play glyph in the
 heading row opens the same page. The cover is downloaded once per track into
 `merp_data/subsonic/covers/current.jpg`; the page and the mini-player read it
 from there.
@@ -107,12 +110,22 @@ means; the queue survives until another track is tapped or **Queue → Clear**.
 songs, then albums, then artists. **Star current** stars or unstars the track
 that is playing; starred tracks are marked with a leading `*` in lists.
 
-The settings screen has **TLS: strict/relaxed**, **Quality: 256/320 kbps, FLAC
-or original**, **Reload settings** and **Back**. The first two write
-`settings.json`; they do not restart the current track, so the next stream uses
-the new setting. **Original** asks the server for the file itself, with no
-transcoding; it plays MP3 and FLAC originals and reports a clear error for any
-other codec.
+The settings screen is a list of the player's two-line rows, each stating the
+value in force:
+
+| Row | What it does |
+| --- | --- |
+| **TLS verification** | Strict or relaxed. Tapping toggles it and saves. |
+| **Streaming quality** | MP3 256, MP3 320, FLAC (server transcodes) or Original (no transcoding). Tapping cycles it. |
+| **Reload settings** | Re-reads `settings.json` from the card. |
+| **Server**, **Account** | Read-only, so the current account is never a guess. |
+| **Settings file** | Where the file lives. Tapping any read-only row says how to edit it. |
+
+The first two write `settings.json`; they do not restart the current track, so
+the next stream uses the new setting. **Original** asks the server for the file
+itself, with no transcoding; it plays MP3 and FLAC originals and reports a
+clear error for any other codec. **Back**, the player's chevron and the
+swipe-back all return to the More menu.
 
 When a track ends, the app plays the next track in the queue. The start and the
 end of a listen of at least thirty seconds are reported to the server with
