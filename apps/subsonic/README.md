@@ -123,6 +123,11 @@ touches widgets. `morpthis_app_shutdown()` stops and joins both threads before
 the player unloads the shared object, including when USB mass storage closes
 the app to share the card.
 
+The player opens at its usual PCM depth: `morpthis_audio_open(..., 0)`, the
+8 x 4096-frame frame-based sizing local playback uses. A 120 ms time-based
+request made the V1's ALSA reject the HW parameters (`buffer 120000 us /
+period 30000 us`, `EINVAL`), so the app does not ask for a short game buffer.
+
 The vendored `http.c` adds `http_abort_all()`, which shuts down the app's open
 sockets instead of closing them; the owning thread still closes them. That is
 what lets the shutdown join a worker that is blocked in connect, a TLS

@@ -15,7 +15,12 @@
 #define PLAYER_STACK (256 * 1024)
 #define READ_TIMEOUT 12
 #define DECODE_FRAMES 1152 // one MPEG-1 Layer III frame
-#define AUDIO_BUFFER_MS 120
+// 0 asks for the player's usual frame-based depth (8 x 4096 frames), the same
+// sizing local playback uses. A time-based request such as 120 ms made this
+// device's ALSA reject the HW parameters (buffer 120000 us / period 30000 us,
+// EINVAL); the deep frame-based buffer is also the better fit for a network
+// stream that can stall.
+#define AUDIO_BUFFER_MS 0
 
 typedef struct {
 	pthread_mutex_t lock;

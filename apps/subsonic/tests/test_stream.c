@@ -29,12 +29,13 @@ static pthread_mutex_t audio_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t audio_frames;
 static int audio_rate;
 static int audio_channels;
+static int audio_buffer_ms;
 
 bool morpthis_audio_open(int rate, int channels, int buffer_ms) {
-	(void)buffer_ms;
 	pthread_mutex_lock(&audio_lock);
 	audio_rate = rate;
 	audio_channels = channels;
+	audio_buffer_ms = buffer_ms;
 	audio_frames = 0;
 	pthread_mutex_unlock(&audio_lock);
 	return true;
@@ -201,10 +202,14 @@ int main(int argc, char **argv) {
 	size_t frames = audio_frames;
 	int rate = audio_rate;
 	int channels = audio_channels;
+	int buffer_ms = audio_buffer_ms;
 	pthread_mutex_unlock(&audio_lock);
 	check(frames > 0, "PCM frames were written");
 	check(rate == 44100, "the MP3 sample rate was used");
 	check(channels == 2, "the MP3 channel count was used");
+	// 0 means the player's own frame-based sizing. Asking for 120 ms made the
+	// device's ALSA reject the buffer/period combination.
+	check(buffer_ms == 0, "the player's usual audio depth was requested");
 
 	// Stop a second stream in the middle. The worker must wake from its read and
 	// leave no completion event for the abandoned generation.
