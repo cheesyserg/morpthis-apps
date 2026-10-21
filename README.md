@@ -9,9 +9,9 @@ them with the SDK, validates the manifests and packages the result as a
 `.mapp`.
 
 **Status.** Foundation. `calculator` is an in-process UI app with the SDK;
-`checksum` is a headless tool that the player runs through its `fork`/`execve`
-path. Both paths are in the player now; see the SDK's
-`docs/player-integration.md`.
+`flappybird` is a game with its own clock and PCM mixer; `checksum` is a
+headless tool that the player runs through its `fork`/`execve` path. All three
+paths are in the player now; see the SDK's `docs/player-integration.md`.
 
 ## Quick start
 
@@ -42,6 +42,7 @@ make MORPTHIS_SDK=/path/to/morpthis-sdk test
 apps/
   calculator/      app.json, icon.png, src/main.c, Makefile
   checksum/        app.json, src/main.c, Makefile
+  flappybird/      app.json, icon.png, src/main.c, assets/, Makefile
 tools/
   validate-manifest.py
   package.sh

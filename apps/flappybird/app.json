@@ -1,0 +1,10 @@
+{
+  "id": "flappybird",
+  "name": "Flappy Bird",
+  "version": "1.0.0",
+  "entry": "flappybird",
+  "icon": "icon.png",
+  "description": "Tap to flap through the pipes",
+  "tier": "heavy",
+  "min_player": 1
+}
