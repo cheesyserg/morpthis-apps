@@ -136,8 +136,9 @@ and the minimum player build. The player does not download anything.
 - Every push and pull request validates every manifest and runs the host build
   and smoke tests.
 - Manual runs — and tags — build the device binaries, run the ABI check and
-  package the `.mapp` files. That job needs the pinned toolchain; set the
-  `MORPTHIS_TOOLCHAIN_URL` repository secret to the SDK's toolchain tarball.
+  package the `.mapp` files. The job builds the pinned toolchain from the
+  player's `rockboxdev` scripts on the first run and restores it from the
+  Actions cache afterwards; no repository secret is required.
 - On a tag, the packages are also attached to the matching GitHub release when
   one exists. The release tag names the app and version, for example
   `calculator-v1.0.0`.
