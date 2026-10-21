@@ -1,9 +1,9 @@
 // Doom for the Morpthis player.
 //
 // The game itself is doomgeneric; this file owns the SDK side: a full-panel
-// canvas, the touch controls below the viewport, and the thread handoff. Doom
-// renders on its own thread into an RGB565 frame; the GUI thread copies that
-// frame into the canvas and never calls into the game.
+// canvas, the translucent landscape touch controls over the picture, and the
+// thread handoff. Doom renders on its own thread into an RGB565 frame; the GUI
+// thread copies that frame into the canvas and never calls into the game.
 
 #include <morpthis/morpthis.h>
 
@@ -19,12 +19,11 @@
 
 MORPTHIS_DEFINE_API_VERSION();
 
-// The player's V1 panel is 240x320; the larger profile is 480x720. Layout
-// scales by whole multiples of the 240-wide design.
-#define BASE_WIDTH 240
+// The panel is held sideways: the app renders a landscape 320x240 design into
+// the portrait canvas, rotated 90 degrees counter-clockwise. On the larger
+// 480x720 profile the same design is scaled by two.
+#define BASE_LANDSCAPE_HEIGHT 240
 
-#define COLOR_BG 0x0841
-#define COLOR_PANEL 0x10A2
 #define COLOR_BUTTON 0x2945
 #define COLOR_RING 0x6B4D
 #define COLOR_TEXT 0xE71C
@@ -32,26 +31,51 @@ MORPTHIS_DEFINE_API_VERSION();
 #define COLOR_FIRE 0x8000
 #define COLOR_FIRE_RING 0xF800
 
+// Overlay opacity, 0..255. The game stays readable underneath.
+#define ALPHA_FILL 90
+#define ALPHA_RING 170
+#define ALPHA_ARROW 190
+#define ALPHA_TEXT 230
+
 static morpthis_screen_t *g_screen;
 static morpthis_widget_t *g_canvas;
 static uint16_t *g_pixels;
 
 static int g_panel_w;
 static int g_panel_h;
+static int g_ui_w; // landscape width  (= panel height)
+static int g_ui_h; // landscape height (= panel width)
 static int g_scale = 1;
+static int g_game_x0;
+static int g_game_y0;
 static int g_game_w;
 static int g_game_h;
-static int g_row_y;
-static int g_row_r;
+
 static int g_dpad_cx;
 static int g_dpad_cy;
 static int g_dpad_r;
 static int g_fire_cx;
 static int g_fire_cy;
 static int g_fire_r;
+static int g_use_cx;
+static int g_use_cy;
+static int g_use_r;
+static int g_run_cx;
+static int g_run_cy;
+static int g_run_r;
+static int g_menu_cx;
+static int g_menu_cy;
+static int g_menu_r;
+static int g_ok_cx;
+static int g_ok_cy;
+static int g_ok_r;
+static int g_x_cx;
+static int g_x_cy;
+static int g_x_r;
 
 static bool g_doom_started;
 static bool g_quitting;
+static bool g_gameplay_keys;
 static char g_wad_name[32];
 
 // ---------------------------------------------------------------------------
@@ -95,146 +119,155 @@ static int text_width(const char *text, int scale) {
 	return chars > 0 ? (chars * 6 - 1) * scale : 0;
 }
 
-static void draw_text(uint16_t *pixels, int x, int y, const char *text, uint16_t color, int scale) {
+// ---------------------------------------------------------------------------
+// landscape drawing
+// ---------------------------------------------------------------------------
+//
+// The canvas is portrait; everything below is expressed in landscape
+// coordinates, where the UI is panel_h wide and panel_w tall. Each write is
+// rotated 90 degrees counter-clockwise, so the device is held with its top
+// edge on the right.
+
+static uint16_t blend565(uint16_t dst, uint16_t src, int alpha) {
+	int inv = 256 - alpha;
+	int dr = (dst >> 11) & 0x1f, dg = (dst >> 5) & 0x3f, db = dst & 0x1f;
+	int sr = (src >> 11) & 0x1f, sg = (src >> 5) & 0x3f, sb = src & 0x1f;
+	int r = (dr * inv + sr * alpha) >> 8;
+	int g = (dg * inv + sg * alpha) >> 8;
+	int b = (db * inv + sb * alpha) >> 8;
+	return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static void put_landscape(int lx, int ly, uint16_t colour, int alpha) {
+	if (lx < 0 || lx >= g_ui_w || ly < 0 || ly >= g_ui_h) {
+		return;
+	}
+	int x = ly;
+	int y = g_panel_h - 1 - lx;
+	if (x < 0 || x >= g_panel_w || y < 0 || y >= g_panel_h) {
+		return;
+	}
+
+	size_t index = (size_t)y * (size_t)g_panel_w + (size_t)x;
+	if (alpha >= 255) {
+		g_pixels[index] = colour;
+	} else if (alpha > 0) {
+		g_pixels[index] = blend565(g_pixels[index], colour, alpha);
+	}
+}
+
+static void fill_rect(int lx, int ly, int width, int height, uint16_t colour, int alpha) {
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			put_landscape(lx + x, ly + y, colour, alpha);
+		}
+	}
+}
+
+static void fill_circle(int cx, int cy, int r, uint16_t colour, int alpha) {
+	for (int dy = -r; dy <= r; dy++) {
+		int dx = (int)(sqrt((double)(r * r - dy * dy)) + 0.5);
+		fill_rect(cx - dx, cy + dy, dx * 2 + 1, 1, colour, alpha);
+	}
+}
+
+static bool in_circle(int lx, int ly, int cx, int cy, int r) {
+	int dx = lx - cx;
+	int dy = ly - cy;
+	return dx * dx + dy * dy <= r * r;
+}
+
+static void draw_text(int lx, int ly, const char *text, uint16_t colour, int alpha, int scale) {
 	for (; *text; text++) {
 		const glyph_t *glyph = glyph_for(*text);
 		if (glyph) {
 			for (int row = 0; row < 7; row++) {
 				for (int col = 0; col < 5; col++) {
 					if (glyph->rows[row] & (1u << (4 - col))) {
-						int px = x + col * scale;
-						int py = y + row * scale;
 						for (int sy = 0; sy < scale; sy++) {
 							for (int sx = 0; sx < scale; sx++) {
-								int dx = px + sx;
-								int dy = py + sy;
-								if (dx >= 0 && dx < g_panel_w && dy >= 0 && dy < g_panel_h) {
-									pixels[(size_t)dy * (size_t)g_panel_w + dx] = color;
-								}
+								put_landscape(lx + col * scale + sx, ly + row * scale + sy,
+											  colour, alpha);
 							}
 						}
 					}
 				}
 			}
 		}
-		x += 6 * scale;
+		lx += 6 * scale;
 	}
 }
 
-static void draw_text_centered(int cx, int cy, const char *text, uint16_t color, int scale) {
-	draw_text(g_pixels, cx - text_width(text, scale) / 2, cy - (7 * scale) / 2, text, color, scale);
+static void draw_text_centered(int cx, int cy, const char *text, uint16_t colour, int alpha,
+							   int scale) {
+	draw_text(cx - text_width(text, scale) / 2, cy - (7 * scale) / 2, text, colour, alpha, scale);
 }
 
-// ---------------------------------------------------------------------------
-// drawing primitives
-// ---------------------------------------------------------------------------
-
-static void fill_rect(int x, int y, int width, int height, uint16_t color) {
-	if (x < 0) {
-		width += x;
-		x = 0;
-	}
-	if (y < 0) {
-		height += y;
-		y = 0;
-	}
-	if (x + width > g_panel_w) {
-		width = g_panel_w - x;
-	}
-	if (y + height > g_panel_h) {
-		height = g_panel_h - y;
-	}
-	if (width <= 0 || height <= 0) {
-		return;
-	}
-
-	for (int row = 0; row < height; row++) {
-		uint16_t *line = g_pixels + (size_t)(y + row) * (size_t)g_panel_w + x;
-		for (int col = 0; col < width; col++) {
-			line[col] = color;
-		}
-	}
-}
-
-static void fill_circle(int cx, int cy, int r, uint16_t color) {
-	for (int dy = -r; dy <= r; dy++) {
-		int dx = (int)(sqrt((double)(r * r - dy * dy)) + 0.5);
-		fill_rect(cx - dx, cy + dy, dx * 2 + 1, 1, color);
-	}
-}
-
-static bool in_circle(int x, int y, int cx, int cy, int r) {
-	int dx = x - cx;
-	int dy = y - cy;
-	return dx * dx + dy * dy <= r * r;
-}
-
-static void draw_button(int cx, int cy, int r, const char *label, uint16_t fill, uint16_t ring,
-						int scale) {
-	fill_circle(cx, cy, r, ring);
-	fill_circle(cx, cy, r - 2, fill);
-	draw_text_centered(cx, cy, label, COLOR_TEXT, scale);
-}
-
-static void fill_arrow(int cx, int cy, int direction, int r, uint16_t color) {
-	// direction: 0 left, 1 right, 2 up, 3 down. Each arm is a triangle
-	// whose apex points away from the centre of the pad.
-	int span = r / 4;      // half the base width
-	int length = r * 3 / 5; // apex distance from the base
+static void fill_arrow(int cx, int cy, int direction, int r, uint16_t colour, int alpha) {
+	// direction: 0 left, 1 right, 2 up, 3 down. Each arm is a triangle whose
+	// apex points away from the centre of the pad.
+	int span = r / 4;
+	int length = r * 3 / 5;
 
 	for (int d = 0; d <= length; d++) {
 		switch (direction) {
 		case 0: {
 			int half = span * d / length;
-			fill_rect(cx - span - length + d, cy - half, 1, half * 2 + 1, color);
+			fill_rect(cx - span - length + d, cy - half, 1, half * 2 + 1, colour, alpha);
 			break;
 		}
 		case 1: {
 			int half = span * (length - d) / length;
-			fill_rect(cx + span + d, cy - half, 1, half * 2 + 1, color);
+			fill_rect(cx + span + d, cy - half, 1, half * 2 + 1, colour, alpha);
 			break;
 		}
 		case 2: {
 			int half = span * d / length;
-			fill_rect(cx - half, cy - span - length + d, half * 2 + 1, 1, color);
+			fill_rect(cx - half, cy - span - length + d, half * 2 + 1, 1, colour, alpha);
 			break;
 		}
 		default: {
 			int half = span * (length - d) / length;
-			fill_rect(cx - half, cy + span + d, half * 2 + 1, 1, color);
+			fill_rect(cx - half, cy + span + d, half * 2 + 1, 1, colour, alpha);
 			break;
 		}
 		}
 	}
 }
 
-static void draw_controls(void) {
-	fill_rect(0, g_game_h, g_panel_w, g_panel_h - g_game_h, COLOR_PANEL);
+static void draw_button(int cx, int cy, int r, const char *label, uint16_t fill, uint16_t ring) {
+	fill_circle(cx, cy, r, ring, ALPHA_RING);
+	fill_circle(cx, cy, r - 2 * g_scale, fill, ALPHA_FILL);
+	draw_text_centered(cx, cy, label, COLOR_TEXT, ALPHA_TEXT, g_scale);
+}
 
-	const char *labels[5] = {"X", "MENU", "OK", "USE", "RUN"};
-	for (int i = 0; i < 5; i++) {
-		int cx = g_panel_w * (2 * i + 1) / 10;
-		draw_button(cx, g_row_y, g_row_r, labels[i], COLOR_BUTTON, COLOR_RING, g_scale);
-	}
-
-	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r, COLOR_RING);
-	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r - 2, COLOR_BUTTON);
+static void draw_overlay(void) {
+	// Movement, bottom-left.
+	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r, COLOR_RING, ALPHA_RING);
+	fill_circle(g_dpad_cx, g_dpad_cy, g_dpad_r - 2 * g_scale, COLOR_BUTTON, ALPHA_FILL);
 	for (int direction = 0; direction < 4; direction++) {
-		fill_arrow(g_dpad_cx, g_dpad_cy, direction, g_dpad_r, COLOR_ARROW);
+		fill_arrow(g_dpad_cx, g_dpad_cy, direction, g_dpad_r, COLOR_ARROW, ALPHA_ARROW);
 	}
 
-	draw_button(g_fire_cx, g_fire_cy, g_fire_r, "FIRE", COLOR_FIRE, COLOR_FIRE_RING, g_scale);
+	// Actions, bottom-right.
+	draw_button(g_fire_cx, g_fire_cy, g_fire_r, "FIRE", COLOR_FIRE, COLOR_FIRE_RING);
+	draw_button(g_use_cx, g_use_cy, g_use_r, "USE", COLOR_BUTTON, COLOR_RING);
+	draw_button(g_run_cx, g_run_cy, g_run_r, "RUN", COLOR_BUTTON, COLOR_RING);
+
+	// Menu and confirm, top-right; leave, top-left.
+	draw_button(g_menu_cx, g_menu_cy, g_menu_r, "MENU", COLOR_BUTTON, COLOR_RING);
+	draw_button(g_ok_cx, g_ok_cy, g_ok_r, "OK", COLOR_BUTTON, COLOR_RING);
+	draw_button(g_x_cx, g_x_cy, g_x_r, "X", COLOR_BUTTON, COLOR_RING);
 }
 
 static void draw_loading(void) {
-	fill_rect(0, 0, g_panel_w, g_panel_h, COLOR_BG);
-	fill_rect(0, g_game_h, g_panel_w, g_panel_h - g_game_h, COLOR_PANEL);
+	memset(g_pixels, 0, (size_t)g_panel_w * (size_t)g_panel_h * sizeof(uint16_t));
 
-	int cx = g_game_w / 2;
-	int cy = g_game_h / 2;
-	draw_text_centered(cx, cy - 12 * g_scale, "DOOM", COLOR_TEXT, g_scale);
-	draw_text_centered(cx, cy + 10 * g_scale, "LOADING", COLOR_RING, g_scale);
-	draw_controls();
+	int cx = g_ui_w / 2;
+	int cy = g_ui_h / 2;
+	draw_text_centered(cx, cy - 16 * g_scale, "DOOM", COLOR_TEXT, 255, 2 * g_scale);
+	draw_text_centered(cx, cy + 10 * g_scale, "LOADING", COLOR_RING, 255, 2 * g_scale);
+	draw_overlay();
 }
 
 // ---------------------------------------------------------------------------
@@ -244,57 +277,58 @@ static void draw_loading(void) {
 static void compute_layout(void) {
 	g_panel_w = morpthis_ui_width();
 	g_panel_h = morpthis_ui_height();
+	g_ui_w = g_panel_h;
+	g_ui_h = g_panel_w;
 
-	g_scale = g_panel_w / BASE_WIDTH;
+	g_scale = g_ui_h / BASE_LANDSCAPE_HEIGHT;
 	if (g_scale < 1) {
 		g_scale = 1;
 	}
 
-	// Doom's 320x200 pixels are 4:3 on screen. The viewport is as wide as the
-	// panel and leaves room for controls below it.
-	g_game_w = g_panel_w;
-	int game_h = g_panel_w * 3 / 4;
-	int max_h = g_panel_h - 120 * g_scale;
-	if (max_h < 60) {
-		max_h = g_panel_h * 2 / 3;
+	// Doom's 320x200 pixels are 4:3 on screen. A 240x320 panel rotated gives
+	// exactly 320x240; a 480x720 one gives 720x480, so the game is centred
+	// with 40-pixel pillars.
+	g_game_w = g_ui_w;
+	g_game_h = g_game_w * 3 / 4;
+	if (g_game_h > g_ui_h) {
+		g_game_h = g_ui_h;
+		g_game_w = g_game_h * 4 / 3;
 	}
-	if (game_h > max_h) {
-		game_h = max_h;
+	if (g_game_w > g_ui_w) {
+		g_game_w = g_ui_w;
+		g_game_h = g_game_w * 3 / 4;
 	}
-	if (game_h < 40) {
-		game_h = g_panel_h * 2 / 3;
-	}
-	g_game_h = game_h;
+	g_game_x0 = (g_ui_w - g_game_w) / 2;
+	g_game_y0 = (g_ui_h - g_game_h) / 2;
 
-	int ctrl_h = g_panel_h - g_game_h;
-	g_row_y = g_game_h + ctrl_h / 7;
-	g_row_r = ctrl_h / 8;
-	if (g_row_r > 22 * g_scale) {
-		g_row_r = 22 * g_scale;
-	}
-	if (g_row_r < 12) {
-		g_row_r = 12;
-	}
+	int s = g_scale;
+	g_dpad_cx = 58 * s;
+	g_dpad_cy = 146 * s;
+	g_dpad_r = 44 * s;
 
-	g_dpad_cx = g_panel_w / 4;
-	g_dpad_cy = g_game_h + ctrl_h * 5 / 8;
-	g_dpad_r = ctrl_h * 3 / 8;
-	if (g_dpad_r > g_panel_w / 5) {
-		g_dpad_r = g_panel_w / 5;
-	}
-	if (g_dpad_r < 24) {
-		g_dpad_r = 24;
-	}
+	g_fire_cx = g_ui_w - 52 * s;
+	g_fire_cy = g_ui_h - 70 * s;
+	g_fire_r = 36 * s;
 
-	g_fire_cx = g_panel_w * 78 / 100;
-	g_fire_cy = g_dpad_cy;
-	g_fire_r = ctrl_h * 3 / 10;
-	if (g_fire_r > g_panel_w / 6) {
-		g_fire_r = g_panel_w / 6;
-	}
-	if (g_fire_r < 24) {
-		g_fire_r = 24;
-	}
+	g_use_cx = g_ui_w - 52 * s;
+	g_use_cy = g_ui_h - 128 * s;
+	g_use_r = 20 * s;
+
+	g_run_cx = g_ui_w - 116 * s;
+	g_run_cy = g_use_cy;
+	g_run_r = 20 * s;
+
+	g_menu_cx = g_ui_w - 28 * s;
+	g_menu_cy = 26 * s;
+	g_menu_r = 15 * s;
+
+	g_ok_cx = g_ui_w - 74 * s;
+	g_ok_cy = g_menu_cy;
+	g_ok_r = 15 * s;
+
+	g_x_cx = 24 * s;
+	g_x_cy = 24 * s;
+	g_x_r = 15 * s;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,53 +395,51 @@ static void release_owner(void) {
 	g_owner = OWN_NONE;
 }
 
-static void touch_down(int x, int y) {
+static void touch_down(int lx, int ly) {
 	if (g_owner != OWN_NONE) {
 		release_owner();
 	}
 
-	for (int i = 0; i < 5; i++) {
-		int cx = g_panel_w * (2 * i + 1) / 10;
-		if (!in_circle(x, y, cx, g_row_y, g_row_r + 2 * g_scale)) {
-			continue;
-		}
-		switch (i) {
-		case 0: // X: leave the app
-			request_quit();
-			break;
-		case 1: // menu
-			dg_port_pulse_key(KEY_ESCAPE, 120);
-			break;
-		case 2: // confirm, including Doom's "y/n" prompts
-			dg_port_pulse_key('y', 100);
-			dg_port_pulse_key(KEY_ENTER, 100);
-			break;
-		case 3: // use / open
-			dg_port_push_key(true, KEY_USE);
-			g_owner = OWN_USE;
-			break;
-		default: // run
-			dg_port_push_key(true, KEY_RSHIFT);
-			g_owner = OWN_RUN;
-			break;
-		}
+	int slop = 2 * g_scale;
+
+	if (in_circle(lx, ly, g_x_cx, g_x_cy, g_x_r + slop)) {
+		request_quit();
 		return;
 	}
-
-	if (in_circle(x, y, g_fire_cx, g_fire_cy, g_fire_r + 2 * g_scale)) {
+	if (in_circle(lx, ly, g_menu_cx, g_menu_cy, g_menu_r + slop)) {
+		dg_port_pulse_key(KEY_ESCAPE, 120);
+		return;
+	}
+	if (in_circle(lx, ly, g_ok_cx, g_ok_cy, g_ok_r + slop)) {
+		// Confirm, including Doom's y/n prompts.
+		dg_port_pulse_key('y', 100);
+		dg_port_pulse_key(KEY_ENTER, 100);
+		return;
+	}
+	if (in_circle(lx, ly, g_use_cx, g_use_cy, g_use_r + slop)) {
+		dg_port_push_key(true, KEY_USE);
+		g_owner = OWN_USE;
+		return;
+	}
+	if (in_circle(lx, ly, g_run_cx, g_run_cy, g_run_r + slop)) {
+		dg_port_push_key(true, KEY_RSHIFT);
+		g_owner = OWN_RUN;
+		return;
+	}
+	if (in_circle(lx, ly, g_fire_cx, g_fire_cy, g_fire_r + slop)) {
 		dg_port_push_key(true, KEY_FIRE);
 		g_owner = OWN_FIRE;
 		return;
 	}
-
-	if (in_circle(x, y, g_dpad_cx, g_dpad_cy, g_dpad_r + 2 * g_scale)) {
+	if (in_circle(lx, ly, g_dpad_cx, g_dpad_cy, g_dpad_r + slop)) {
 		g_owner = OWN_DPAD;
-		update_dpad(x, y);
+		update_dpad(lx, ly);
 		return;
 	}
 
-	if (y >= 0 && y < g_game_h && x >= 0 && x < g_game_w) {
-		// A tap on the picture fires, so the first screen (title, demo) can be
+	if (lx >= g_game_x0 && lx < g_game_x0 + g_game_w && ly >= g_game_y0 &&
+		ly < g_game_y0 + g_game_h) {
+		// A tap on the picture fires, so the title screen and demos can be
 		// dismissed without reaching for a button.
 		dg_port_push_key(true, KEY_FIRE);
 		g_owner = OWN_VIEW;
@@ -417,13 +449,18 @@ static void touch_down(int x, int y) {
 static void touch_cb(morpthis_touch_action_t action, morpthis_point_t point, void *user) {
 	(void)user;
 
+	// Touch arrives in portrait canvas pixels; the controls live in landscape
+	// coordinates. See put_landscape() for the forward rotation.
+	int lx = g_panel_h - 1 - point.y;
+	int ly = point.x;
+
 	switch (action) {
 	case MORPTHIS_TOUCH_DOWN:
-		touch_down(point.x, point.y);
+		touch_down(lx, ly);
 		break;
 	case MORPTHIS_TOUCH_MOVE:
 		if (g_owner == OWN_DPAD) {
-			update_dpad(point.x, point.y);
+			update_dpad(lx, ly);
 		}
 		break;
 	case MORPTHIS_TOUCH_UP:
@@ -447,7 +484,13 @@ static void button_cb(morpthis_button_t button, morpthis_input_action_t action, 
 		dg_port_pulse_key(']', 120);
 		break;
 	case MORPTHIS_BUTTON_PREV:
-		dg_port_pulse_key('[', 120);
+		dg_port_pulse_key(KEY_USE, 120);
+		break;
+	case MORPTHIS_BUTTON_VOLUME_UP:
+		dg_port_pulse_key(KEY_STRAFE_R, 100);
+		break;
+	case MORPTHIS_BUTTON_VOLUME_DOWN:
+		dg_port_pulse_key(KEY_STRAFE_L, 100);
 		break;
 	case MORPTHIS_BUTTON_POWER:
 		dg_port_pulse_key(KEY_ESCAPE, 120);
@@ -472,7 +515,15 @@ static void frame_posted(void *unused) {
 
 	dg_frame_result_t result = dg_port_copy_frame(g_pixels, g_panel_w);
 	if (result & DG_FRAME_COPIED) {
-		morpthis_canvas_invalidate(g_canvas, 0, 0, g_game_w, g_game_h);
+		bool gameplay = dg_port_gameplay_active();
+		if (gameplay != g_gameplay_keys) {
+			g_gameplay_keys = gameplay;
+			morpthis_logd("doom", "gameplay controls %s", gameplay ? "on" : "off");
+			morpthis_input_set_gameplay(gameplay);
+		}
+
+		draw_overlay();
+		morpthis_canvas_invalidate(g_canvas, 0, 0, g_panel_w, g_panel_h);
 		morpthis_ui_refresh();
 	}
 }
@@ -531,6 +582,8 @@ static void on_doom_exited(void *unused) {
 
 	dg_port_join();
 	g_doom_started = false;
+	g_gameplay_keys = false;
+	morpthis_input_set_gameplay(false);
 
 	char error[512];
 	if (!g_quitting && dg_port_take_error(error, sizeof(error))) {
@@ -792,8 +845,10 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	morpthis_logi("doom", "using IWAD %s", wad);
 
 	size_t available = morpthis_app_mem_available();
-	if (available != SIZE_MAX && available < (size_t)8 * 1024 * 1024) {
-		morpthis_loge("doom", "only %zu bytes available", available);
+	size_t frame_bytes = (size_t)g_panel_w * (size_t)g_panel_h * sizeof(uint16_t) * 2;
+	size_t needed = (size_t)6 * 1024 * 1024 + frame_bytes + (size_t)2 * 1024 * 1024;
+	if (available != SIZE_MAX && available < needed) {
+		morpthis_loge("doom", "only %zu bytes available, need about %zu", available, needed);
 		if (!show_error_screen("Not enough free memory to start Doom. Close other "
 							   "apps and try again.")) {
 			return 1;
@@ -806,8 +861,15 @@ int morpthis_app_main(const morpthis_app_t *app) {
 		return 1;
 	}
 
-	if (!dg_port_start(wad, morpthis_fs_app_folder(), g_game_w, g_game_h, post_frame,
-					   doom_exited)) {
+	dg_geometry_t geometry = {
+		.panel_w = g_panel_w,
+		.panel_h = g_panel_h,
+		.game_x0 = g_game_x0,
+		.game_y0 = g_game_y0,
+		.game_w = g_game_w,
+		.game_h = g_game_h,
+	};
+	if (!dg_port_start(wad, morpthis_fs_app_folder(), &geometry, post_frame, doom_exited)) {
 		morpthis_loge("doom", "could not start the game thread");
 		if (!show_error_screen("Could not start the Doom thread.")) {
 			return 1;
@@ -816,7 +878,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	}
 
 	g_doom_started = true;
-	morpthis_logi("doom", "running %dx%d (panel %dx%d)", g_game_w, g_game_h, g_panel_w,
-				  g_panel_h);
+	morpthis_logi("doom", "running %dx%d landscape at (%d,%d), panel %dx%d", g_game_w,
+				  g_game_h, g_game_x0, g_game_y0, g_panel_w, g_panel_h);
 	return 0;
 }

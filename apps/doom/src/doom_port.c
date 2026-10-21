@@ -20,6 +20,7 @@
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
+#include "doomstat.h"
 #include "i_system.h"
 #include "i_video.h"
 #include "m_controls.h"
@@ -138,8 +139,12 @@ int DG_GetKey(int *pressed, unsigned char *doomKey) {
 // frame handoff
 // ---------------------------------------------------------------------------
 
-static int g_out_w;
-static int g_out_h;
+static int g_panel_w;
+static int g_panel_h;
+static int g_game_x0;
+static int g_game_y0;
+static int g_game_w;
+static int g_game_h;
 static int *g_sx;
 static int *g_sy;
 
@@ -177,11 +182,16 @@ void DG_DrawFrame(void) {
 
 	update_palette();
 
-	for (int y = 0; y < g_out_h; y++) {
-		const uint8_t *src = (const uint8_t *)DG_ScreenBuffer + g_sy[y] * DOOMGENERIC_RESX;
-		uint16_t *dst = g_frame_back + (size_t)y * (size_t)g_out_w;
-		for (int x = 0; x < g_out_w; x++) {
-			dst[x] = g_palette[src[g_sx[x]]];
+	// Doom's 320x200 picture is scaled to the landscape game rectangle and
+	// rotated 90 degrees counter-clockwise into the portrait canvas. With the
+	// device's top edge on the right, the result reads upright in landscape.
+	for (int ly = 0; ly < g_game_h; ly++) {
+		const uint8_t *src = (const uint8_t *)DG_ScreenBuffer + g_sy[ly] * DOOMGENERIC_RESX;
+		for (int lx = 0; lx < g_game_w; lx++) {
+			uint16_t colour = g_palette[src[g_sx[lx]]];
+			int x = g_game_y0 + ly;
+			int y = g_panel_h - 1 - (g_game_x0 + lx);
+			g_frame_back[(size_t)y * (size_t)g_panel_w + (size_t)x] = colour;
 		}
 	}
 
@@ -207,9 +217,9 @@ dg_frame_result_t dg_port_copy_frame(uint16_t *dst, int stride) {
 
 	pthread_mutex_lock(&g_lock);
 	if (g_frame_valid && g_frame_front) {
-		for (int y = 0; y < g_out_h; y++) {
-			memcpy(dst + (size_t)y * (size_t)stride, g_frame_front + (size_t)y * (size_t)g_out_w,
-				   (size_t)g_out_w * sizeof(uint16_t));
+		for (int y = 0; y < g_panel_h; y++) {
+			memcpy(dst + (size_t)y * (size_t)stride, g_frame_front + (size_t)y * (size_t)g_panel_w,
+				   (size_t)g_panel_w * sizeof(uint16_t));
 		}
 		result = DG_FRAME_COPIED;
 	}
@@ -230,6 +240,7 @@ dg_frame_result_t dg_port_copy_frame(uint16_t *dst, int stride) {
 static pthread_t g_thread;
 static bool g_thread_started;
 static volatile bool g_quit;
+static volatile bool g_gameplay;
 
 static char *g_wad_path;
 static char *g_base_dir;
@@ -279,6 +290,8 @@ static void doom_cleanup(void) {
 static void *doom_thread_main(void *unused) {
 	(void)unused;
 
+	extern boolean advancedemo;
+
 	char *argv[9];
 	argv[0] = (char *)"doom";
 	argv[1] = (char *)"-iwad";
@@ -302,6 +315,12 @@ static void *doom_thread_main(void *unused) {
 
 		while (!g_quit) {
 			doomgeneric_Tick();
+
+			// Active play is a running level with no menu or pause over it. The
+			// app offers the volume keys to the game only in this state;
+			// intermission, the title screen, demos and menus get the rocker back.
+			g_gameplay = gamestate == GS_LEVEL && !paused && !menuactive &&
+						 !demoplayback && !advancedemo;
 		}
 
 		// A quit requested by the host (BACK, the X control) ends the loop
@@ -325,14 +344,32 @@ static void *doom_thread_main(void *unused) {
 	return NULL;
 }
 
-bool dg_port_start(const char *wad_path, const char *base_dir, int out_width, int out_height,
+bool dg_port_start(const char *wad_path, const char *base_dir, const dg_geometry_t *geometry,
 				   dg_port_notify_fn notify, dg_port_exit_fn exited) {
-	if (!wad_path || !base_dir || out_width <= 0 || out_height <= 0) {
+	if (!wad_path || !base_dir || !geometry) {
+		return false;
+	}
+	if (geometry->panel_w <= 0 || geometry->panel_h <= 0 || geometry->game_w <= 0 ||
+		geometry->game_h <= 0) {
+		return false;
+	}
+	// The landscape UI is panel_h wide and panel_w tall; the game rectangle
+	// must fit inside it.
+	if (geometry->game_x0 < 0 || geometry->game_y0 < 0 ||
+		geometry->game_x0 + geometry->game_w > geometry->panel_h ||
+		geometry->game_y0 + geometry->game_h > geometry->panel_w) {
 		return false;
 	}
 	if (g_thread_started) {
 		return false;
 	}
+
+	g_panel_w = geometry->panel_w;
+	g_panel_h = geometry->panel_h;
+	g_game_x0 = geometry->game_x0;
+	g_game_y0 = geometry->game_y0;
+	g_game_w = geometry->game_w;
+	g_game_h = geometry->game_h;
 
 	// Doom's config code concatenates this string with a file name, so the
 	// directory must end with a separator.
@@ -343,10 +380,11 @@ bool dg_port_start(const char *wad_path, const char *base_dir, int out_width, in
 				 (base_len > 0 && base_dir[base_len - 1] == '/') ? "" : "/");
 	}
 	g_wad_path = strdup(wad_path);
-	g_sx = malloc((size_t)out_width * sizeof(int));
-	g_sy = malloc((size_t)out_height * sizeof(int));
-	g_frame_front = malloc((size_t)out_width * (size_t)out_height * sizeof(uint16_t));
-	g_frame_back = malloc((size_t)out_width * (size_t)out_height * sizeof(uint16_t));
+	g_sx = malloc((size_t)g_game_w * sizeof(int));
+	g_sy = malloc((size_t)g_game_h * sizeof(int));
+	size_t frame_pixels = (size_t)g_panel_w * (size_t)g_panel_h;
+	g_frame_front = malloc(frame_pixels * sizeof(uint16_t));
+	g_frame_back = malloc(frame_pixels * sizeof(uint16_t));
 
 	if (!g_wad_path || !g_base_dir || !g_sx || !g_sy || !g_frame_front || !g_frame_back) {
 		free(g_wad_path);
@@ -364,21 +402,25 @@ bool dg_port_start(const char *wad_path, const char *base_dir, int out_width, in
 		return false;
 	}
 
-	for (int x = 0; x < out_width; x++) {
-		g_sx[x] = x * DOOMGENERIC_RESX / out_width;
+	for (int x = 0; x < g_game_w; x++) {
+		g_sx[x] = x * DOOMGENERIC_RESX / g_game_w;
 	}
-	for (int y = 0; y < out_height; y++) {
-		g_sy[y] = y * DOOMGENERIC_RESY / out_height;
+	for (int y = 0; y < g_game_h; y++) {
+		g_sy[y] = y * DOOMGENERIC_RESY / g_game_h;
 	}
 
-	g_out_w = out_width;
-	g_out_h = out_height;
+	// The letterbox bars stay black: only the game rectangle is written each
+	// frame.
+	memset(g_frame_front, 0, frame_pixels * sizeof(uint16_t));
+	memset(g_frame_back, 0, frame_pixels * sizeof(uint16_t));
+
 	g_frame_valid = false;
 	g_notify_pending = false;
 	g_palette_ready = false;
 	g_notify = notify;
 	g_exit_cb = exited;
 	g_quit = false;
+	g_gameplay = false;
 	g_cleanup_done = false;
 	g_exit_funcs_ran = false;
 	g_error[0] = '\0';
@@ -443,6 +485,10 @@ void dg_port_request_quit(void) {
 
 bool dg_port_running(void) {
 	return g_thread_started;
+}
+
+bool dg_port_gameplay_active(void) {
+	return g_gameplay;
 }
 
 bool dg_port_take_error(char *buffer, size_t size) {

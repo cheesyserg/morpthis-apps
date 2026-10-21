@@ -5,10 +5,12 @@ The classic Doom engine on the player's Apps page, built from
 SDK.
 
 Doom runs on a thread of the app's own. Its 320x200 indexed frame is expanded
-through Doom's palette into RGB565 and scaled to the panel's 4:3 viewport; the
-GUI thread blits that into a `morpthis_canvas_create()` canvas and never calls
-into the game. Input goes the other way: the touch controls and physical keys
-push Doom key events into a queue that `DG_GetKey()` drains.
+through Doom's palette into RGB565 and scaled to a 4:3 landscape rectangle; the
+port rotates that rectangle into the panel's portrait canvas, so the player is
+held sideways with its top edge on the right. The controls are translucent and
+sit over the picture, using the whole screen for the game. Input goes the other
+way: the touch controls and physical keys push Doom key events into a queue
+that `DG_GetKey()` drains.
 
 ## Game data
 
@@ -37,7 +39,9 @@ error screen reports the size it found.
 
 ## Controls
 
-The top of the panel is the game; the controls are below it.
+Hold the player landscape, with its top edge on the right. The game fills the
+screen; the controls are drawn over it, semi-transparent so the picture stays
+readable underneath.
 
 | Control | What it does |
 | --- | --- |
@@ -52,18 +56,28 @@ The top of the panel is the game; the controls are below it.
 In Doom's menu, `MENU` opens it, the D-pad moves, `OK` selects.
 **Quit Game** asks `y/n`; `OK` sends `y` first, so it confirms.
 
-The physical keys work too:
+The physical keys use the same landscape idea:
 
 | Key | Action |
 | --- | --- |
 | PLAY/PAUSE | Fire (a short burst) |
-| NEXT / PREV | Next / previous weapon |
+| NEXT | Next weapon |
+| PREV | Use (open doors, press switches) |
+| VOLUME UP / DOWN | Strafe right / left while playing |
 | POWER | Menu |
 | BACK | Leave the app, when the player delivers it |
 
-The player reports the transport keys as press-only, so each press is turned
-into a short hold and released by the port itself. Volume keys stay the
-player's.
+The volume keys are contextual. While a level is being played they strafe. In
+Doom's menu, on the pause screen, on intermission/finale screens and while
+Doom is loading, the game hands them back and they adjust the player's volume
+as usual. The app tells the player which state it is in with
+`morpthis_input_set_gameplay()`; this needs a player that implements that call.
+
+Doom turns left and right with the D-pad and strafes with the volume keys,
+which keeps the two axes apart for touch play. The player reports the physical
+transport and volume keys as press-only, so each press is turned into a short
+hold and released by the port itself. Holding a volume key repeats the press,
+which keeps strafing until it is let go.
 
 ## Saving
 

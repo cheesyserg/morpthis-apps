@@ -27,10 +27,23 @@ typedef void (*dg_port_notify_fn)(void);
 // teardown from here, then joins the Doom thread.
 typedef void (*dg_port_exit_fn)(void);
 
+// Where the game goes on the portrait canvas. Landscape coordinates have the
+// origin at the top-left of the panel as the user holds it: the panel's long
+// edge is the landscape width. The port rotates its output 90 degrees
+// counter-clockwise into the canvas, so the device is held with its top edge
+// to the right.
+typedef struct {
+	int panel_w;  // canvas width in pixels (portrait)
+	int panel_h;  // canvas height in pixels (portrait)
+	int game_x0;  // game rectangle in landscape coordinates
+	int game_y0;
+	int game_w;
+	int game_h;
+} dg_geometry_t;
+
 // Starts the Doom thread. `wad_path` is the absolute path of the IWAD and
 // `base_dir` is the app folder (default.cfg and savegames are written there).
-// `out_width` x `out_height` is the scaled game picture the port produces.
-bool dg_port_start(const char *wad_path, const char *base_dir, int out_width, int out_height,
+bool dg_port_start(const char *wad_path, const char *base_dir, const dg_geometry_t *geometry,
 				   dg_port_notify_fn notify, dg_port_exit_fn exited);
 
 // Joins the Doom thread. Sets the quit flag first, so the join is bounded by
@@ -43,8 +56,14 @@ void dg_port_request_quit(void);
 
 bool dg_port_running(void);
 
+// True while Doom is in active play: a level is running with no menu or pause
+// over it. The app forwards this to the player so the volume keys act as
+// controls only during play and go back to the player's volume otherwise.
+bool dg_port_gameplay_active(void);
+
 // Copies the newest completed frame into `dst`, whose stride is `stride`
-// pixels. GUI thread only.
+// pixels. The frame is already in the canvas's portrait orientation. GUI
+// thread only.
 dg_frame_result_t dg_port_copy_frame(uint16_t *dst, int stride);
 
 // Copies the fatal error message, if the Doom thread died from I_Error().
