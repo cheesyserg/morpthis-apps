@@ -46,9 +46,15 @@ the matching SDK. It does not run on a player that predates them.
 
 The five effects are the original Ogg files decoded to WAV and checked in under
 `assets/sounds/`. A second thread loads them, then takes the output with
-`morpthis_audio_open(44100, 2, 46)` and mixes them into it: the write blocks at
+`morpthis_audio_open(44100, 2, 46)` **on the first sound that actually plays**
+(the title screen is silent and a muted game never asks): the write blocks at
 the rate the DAC plays, which paces the 10 ms mix. The output is closed as the
 thread stops, before the app leaves. With no sound card the game still runs.
+
+The DAC is opened on a thread of the app's own and the mixer is joined on one
+too, never on the GUI thread: an open or a write can be inside a driver that
+takes seconds to answer, and the player must not wait there. The screen is
+released once the mixer is gone.
 
 ## Artwork
 

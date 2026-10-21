@@ -1579,6 +1579,34 @@ static pthread_t mixer_thread;
 static volatile bool mixer_stop;
 static bool mixer_started;
 
+// The DAC is taken on the first sound that actually plays, not when the app
+// opens. The title screen is silent, so a game that is left before it is
+// played never asks for the output; and a slower open can no longer be in the
+// way when the screen is left. `sound_wanted` is set from the GUI thread and
+// waited on by the mixer.
+static pthread_mutex_t sound_gate_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sound_gate_cond = PTHREAD_COND_INITIALIZER;
+static bool sound_wanted;
+
+static void sound_request_output(void) {
+	pthread_mutex_lock(&sound_gate_lock);
+	sound_wanted = true;
+	pthread_cond_signal(&sound_gate_cond);
+	pthread_mutex_unlock(&sound_gate_lock);
+}
+
+// False when the mixer was stopped while it waited: the app is leaving and the
+// output must not be opened at all.
+static bool sound_wait_for_output(void) {
+	pthread_mutex_lock(&sound_gate_lock);
+	while (!sound_wanted && !mixer_stop) {
+		pthread_cond_wait(&sound_gate_cond, &sound_gate_lock);
+	}
+	bool go = sound_wanted && !mixer_stop;
+	pthread_mutex_unlock(&sound_gate_lock);
+	return go;
+}
+
 static const char *const SOUND_FILES[SFX_KINDS] = {
 	[SFX_WING] = "assets/sounds/sfx_wing.wav",
 	[SFX_POINT] = "assets/sounds/sfx_point.wav",
@@ -1690,11 +1718,19 @@ static void sound_play(sfx_t sfx) {
 	if ((unsigned)sfx >= SFX_KINDS) {
 		return;
 	}
+	bool playable = false;
 	pthread_mutex_lock(&sound_lock);
 	if (sounds[sfx].pcm) {
 		sounds[sfx].pos = 0;
+		playable = true;
 	}
 	pthread_mutex_unlock(&sound_lock);
+
+	// Only a sound that will be heard is a reason to take the DAC; a muted
+	// game leaves it alone entirely.
+	if (playable && sound_on) {
+		sound_request_output();
+	}
 }
 
 static void mix_into(int32_t *mix) {
@@ -1740,12 +1776,17 @@ static void *mixer_main(void *unused) {
 		}
 	}
 	morpthis_logi("flappy", "%d of %d sounds loaded", loaded, SFX_KINDS);
-	if (loaded == 0 || mixer_stop) {
+	if (loaded == 0) {
 		return NULL;
 	}
 
-	// The output is taken only once the sounds are in memory, so opening it
-	// and stopping the player's track is not a pause in the middle of a load.
+	// Nothing is played until the game asks for a sound, and by then the app
+	// may already have been left: the wait returns false and no output is
+	// opened at all.
+	if (!sound_wait_for_output()) {
+		return NULL;
+	}
+
 	if (!morpthis_audio_open(SOUND_RATE, 2, 46)) {
 		morpthis_loge("flappy", "no PCM; playing silently");
 		return NULL;
@@ -1783,6 +1824,12 @@ static void sound_stop(void) {
 		return;
 	}
 	mixer_stop = true;
+	// A mixer still loading or waiting for its first sound wakes here instead
+	// of sitting in the condition wait while the app is torn down.
+	pthread_mutex_lock(&sound_gate_lock);
+	pthread_cond_broadcast(&sound_gate_cond);
+	pthread_mutex_unlock(&sound_gate_lock);
+
 	pthread_join(mixer_thread, NULL);
 	mixer_started = false;
 
@@ -1843,14 +1890,59 @@ static void free_world(void) {
 	art_free();
 }
 
+// Quitting is two steps: the threads stop first, then the screen goes. The
+// second step has to run on the GUI thread (morpthis_app_quit() is a GUI call),
+// but joining the mixer must not: it can be inside the DAC's open or a write
+// that the driver has not returned from, and a GUI thread waiting there is a
+// frozen player, not a slow exit.
+static volatile bool quitting;
+static bool quit_finished;
+static pthread_t quit_thread;
+static bool quit_thread_started;
+
+static void finish_quit(void *unused) {
+	(void)unused;
+	if (quit_finished) {
+		return;
+	}
+	quit_finished = true;
+
+	// The worker is about to return from the post it made; waiting for it here
+	// costs nothing and keeps the player from unloading the plugin while the
+	// last of its code is still on a stack. The slow part -- the mixer -- was
+	// already joined inside it.
+	if (quit_thread_started) {
+		pthread_join(quit_thread, NULL);
+		quit_thread_started = false;
+	}
+
+	free_world();
+	morpthis_app_quit();
+}
+
+static void *quit_worker(void *unused) {
+	(void)unused;
+	int64_t started = now_us();
+	sound_stop();
+	morpthis_logi("flappy", "mixer stopped after %.1f ms", (double)(now_us() - started) / 1000.0);
+	morpthis_app_post(finish_quit, NULL);
+	return NULL;
+}
+
 static void game_quit(void) {
+	if (quitting) {
+		return; // a second tap while the first quit is still winding down
+	}
+	quitting = true;
+
 	if (!active) {
 		morpthis_app_quit();
 		return;
 	}
 	active = false;
 
-	sound_stop();
+	// The clock first: it is the thread that touches the frame and the sprites,
+	// and its join is bounded by one tick.
 	tick_stop();
 
 	if (best_unsaved) {
@@ -1867,8 +1959,19 @@ static void game_quit(void) {
 					  (double)stats.longest_work / 1000.0, score, best);
 	}
 
-	free_world();
-	morpthis_app_quit();
+	// The mixer is joined off the GUI thread. The post is the quit's second
+	// step: it runs once no app thread is left, so the player can unload the
+	// plugin safely.
+	pthread_t worker;
+	if (pthread_create(&worker, NULL, quit_worker, NULL) == 0) {
+		quit_thread = worker;
+		quit_thread_started = true;
+		return;
+	}
+
+	// No worker: a plain join, which is what this did before.
+	sound_stop();
+	finish_quit(NULL);
 }
 
 static bool game_setup(void) {
