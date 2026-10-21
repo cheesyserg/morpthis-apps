@@ -36,7 +36,7 @@ check-abi: device
 package: validate
 	@mkdir -p dist
 	@set -e; for app in $(APPS); do \
-		./tools/package.sh apps/$$app dist; \
+		sh tools/package.sh apps/$$app dist; \
 	done
 
 clean:

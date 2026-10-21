@@ -133,8 +133,8 @@ and the minimum player build. The player does not download anything.
 
 ## CI
 
-- Every push and pull request validates every manifest and runs the host build
-  and smoke tests.
+- Every push and pull request validates every manifest, runs the host build
+  and smoke tests, and dry-runs the packaging in host mode.
 - Device builds live in `morpthis-build`. That workflow checks this repository
   out, builds the pinned MIPS toolchain from the player's `rockboxdev` scripts
   (restored from the Actions cache afterwards), runs the ABI check and packages

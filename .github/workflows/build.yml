@@ -30,3 +30,7 @@ jobs:
           path: sdk
       - name: Build and test
         run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" test
+      # Packaging logic only: host-mode .mapp files are not shipped. Device
+      # packages come from morpthis-build.
+      - name: Dry-run the packaging
+        run: make MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" package
