@@ -5,11 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 
 #include <morpthis/morpthis.h>
 
 #include "vendor/dr_mp3.h"
+#include "vendor/dr_flac.h"
 #include "vendor/http.h"
 
 #define PLAYER_STACK (256 * 1024)
@@ -127,6 +129,29 @@ static size_t read_body(void *user, void *buffer, size_t bytes) {
 	return (size_t)got;
 }
 
+static size_t flac_read(void *user, void *buffer, size_t bytes) { return read_body(user, buffer, bytes); }
+
+// dr_flac insists on a seek callback even when the stream is only read forward.
+// Everything it does at open time is either a forward skip (metadata, ID3) or an
+// attempt to load a seektable; refusing the latter is fine, dr_flac pretends the
+// stream has none and starts at the first frame.
+static drflac_bool32 flac_seek(void *user, int offset, drflac_seek_origin origin) {
+	source_t *source = user;
+	if (origin == DRFLAC_SEEK_END || origin == DRFLAC_SEEK_SET || offset < 0) {
+		return DRFLAC_FALSE;
+	}
+	unsigned char scratch[2048];
+	while (offset > 0) {
+		size_t want = (size_t)offset < sizeof(scratch) ? (size_t)offset : sizeof(scratch);
+		size_t got = read_body(source, scratch, want);
+		if (got == 0) {
+			return DRFLAC_FALSE;
+		}
+		offset -= (int)got;
+	}
+	return DRFLAC_TRUE;
+}
+
 static void play_one(const stream_track_t *track, unsigned generation) {
 	char url[SUBSONIC_URL_MAX];
 	char error[192] = "";
@@ -185,37 +210,85 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 		return;
 	}
 
-	drmp3 *mp3 = calloc(1, sizeof(*mp3));
-	if (!mp3) {
-		http_stream_close(&http);
-		post_event(generation, STREAM_EVENT_FAILED, "Not enough memory for the decoder.", track);
-		return;
-	}
-	source_t source = {.http = &http, .generation = generation, .io_error = false};
-	if (!drmp3_init(mp3, read_body, NULL, NULL, NULL, &source, NULL)) {
-		drmp3_uninit(mp3);
-		free(mp3);
-		if (!aborted(generation)) {
-			post_event(generation, STREAM_EVENT_FAILED,
-					   source.io_error ? "The stream ended before any audio arrived."
-									   : "The server did not send an MP3 stream. Enable MP3 transcoding on it.",
-					   track);
-		}
+	bool flac_stream = track->format == SUBSONIC_FORMAT_FLAC;
+	if (track->format == SUBSONIC_FORMAT_OPUS) {
+		post_event(generation, STREAM_EVENT_FAILED,
+				   "This app does not decode Opus. Choose MP3 or FLAC on the server.", track);
 		goto done;
 	}
+	if (track->format == SUBSONIC_FORMAT_RAW) {
+		if (strcasecmp(track->suffix, "flac") == 0) {
+			flac_stream = true;
+		} else if (strcasecmp(track->suffix, "mp3") == 0) {
+			flac_stream = false;
+		} else {
+			char why[160];
+			snprintf(why, sizeof(why),
+					 "This app cannot decode a raw %s; choose MP3 or FLAC transcoding.",
+					 track->suffix[0] ? track->suffix : "file");
+			post_event(generation, STREAM_EVENT_FAILED, why, track);
+			goto done;
+		}
+	}
 
-	int rate = (int)mp3->sampleRate;
-	int channels = (int)mp3->channels;
+	drmp3 *mp3 = NULL;
+	drflac *flac = NULL;
+	source_t source = {.http = &http, .generation = generation, .io_error = false};
+	int rate;
+	int channels;
+	if (flac_stream) {
+		flac = drflac_open(flac_read, flac_seek, NULL, &source, NULL);
+		if (!flac) {
+			if (!aborted(generation)) {
+				post_event(generation, STREAM_EVENT_FAILED,
+						   source.io_error ? "The stream ended before any audio arrived."
+										  : "The server did not send a FLAC stream. Enable FLAC transcoding on it.",
+						   track);
+			}
+			goto done;
+		}
+		rate = (int)flac->sampleRate;
+		channels = (int)flac->channels;
+	} else {
+		mp3 = calloc(1, sizeof(*mp3));
+		if (!mp3) {
+			post_event(generation, STREAM_EVENT_FAILED, "Not enough memory for the decoder.", track);
+			goto done;
+		}
+		if (!drmp3_init(mp3, read_body, NULL, NULL, NULL, &source, NULL)) {
+			drmp3_uninit(mp3);
+			free(mp3);
+			if (!aborted(generation)) {
+				post_event(generation, STREAM_EVENT_FAILED,
+						   source.io_error ? "The stream ended before any audio arrived."
+										  : "The server did not send an MP3 stream. Enable MP3 transcoding on it.",
+						   track);
+			}
+			goto done;
+		}
+		rate = (int)mp3->sampleRate;
+		channels = (int)mp3->channels;
+	}
+
 	if (rate <= 0 || channels < 1 || channels > 2 || !morpthis_audio_open(rate, channels, AUDIO_BUFFER_MS)) {
-		drmp3_uninit(mp3);
-		free(mp3);
+		if (flac) {
+			drflac_close(flac);
+		} else {
+			drmp3_uninit(mp3);
+			free(mp3);
+		}
 		if (!aborted(generation)) {
 			post_event(generation, STREAM_EVENT_FAILED, "Could not open the audio output.", track);
 		}
 		goto done;
 	}
 
+	// Now playing, best effort. The GUI thread hands this to the action worker:
+	// a scrobble must never hold up the thread that feeds the DAC.
+	post_event(generation, STREAM_EVENT_STARTED, "", track);
+
 	int16_t pcm[DECODE_FRAMES * 2];
+	uint64_t frames_played = 0;
 	bool failed = false;
 	const char *why = NULL;
 	for (;;) {
@@ -229,7 +302,8 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			break;
 		}
 
-		drmp3_uint64 got = drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
+		uint64_t got = flac_stream ? drflac_read_pcm_frames_s16(flac, DECODE_FRAMES, pcm)
+								   : drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
 		if (got == 0) {
 			if (source.io_error) {
 				failed = true;
@@ -245,11 +319,26 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			}
 			break;
 		}
+		frames_played += got;
 	}
 
 	morpthis_audio_close();
-	drmp3_uninit(mp3);
-	free(mp3);
+	if (flac) {
+		drflac_close(flac);
+	} else {
+		drmp3_uninit(mp3);
+		free(mp3);
+	}
+
+	// Submission is the half that counts; only for a real listen (thirty
+	// seconds), never for a stop pressed two seconds in. Posted with the current
+	// generation so a deliberate stop after the mark still reaches the worker.
+	if (rate > 0 && frames_played * 1000u / (uint64_t)rate >= 30000u) {
+		pthread_mutex_lock(&player.lock);
+		unsigned delivery = player.generation;
+		pthread_mutex_unlock(&player.lock);
+		post_event(delivery, STREAM_EVENT_LISTENED, "", track);
+	}
 
 	if (!aborted(generation)) {
 		post_event(generation, failed ? STREAM_EVENT_FAILED : STREAM_EVENT_FINISHED,

@@ -5,7 +5,8 @@
 
 Starts a tiny Subsonic-compatible HTTP server on 127.0.0.1, runs the C test
 binary against it, and checks its exit status. No external network and no
-server is needed; the "MP3" is a run of valid silent MPEG-1 Layer III frames.
+server is needed; the "MP3" is a run of valid silent MPEG-1 Layer III frames and
+the FLAC stream is a real 80-block verbatim stream.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import os
 import shutil
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,41 @@ import threading
 FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
 STREAM_FRAMES = 600
 STREAM = FRAME * STREAM_FRAMES
+
+
+def crc(data: bytes, bits: int, polynomial: int) -> int:
+    value = 0
+    mask = (1 << bits) - 1
+    for byte in data:
+        value ^= byte << (bits - 8)
+        for _ in range(8):
+            value = ((value << 1) ^ (polynomial if value & (1 << (bits - 1)) else 0)) & mask
+    return value
+
+
+def make_flac() -> bytes:
+    """80 blocks x 4096 samples, 44.1 kHz stereo 16-bit, verbatim frames.
+
+    A real STREAMINFO and real frame CRCs, so dr_flac decodes it as a normal
+    lossless stream. The exact PCM frame count is 80 * 4096.
+    """
+    count, block = 80, 4096
+    frames = []
+    for i in range(count):
+        header = b"\xff\xf8\x79\x18" + bytes([i]) + struct.pack(">H", block - 1)
+        header += bytes([crc(header, 8, 0x07)])
+        frame = header + (b"\x02" + bytes(block * 2)) * 2
+        frames.append(frame + struct.pack(">H", crc(frame, 16, 0x8005)))
+    size = len(frames[0])
+    info = struct.pack(">HH", block, block) + size.to_bytes(3, "big") * 2
+    info += ((44100 << 44) | (1 << 41) | (15 << 36) | (count * block)).to_bytes(8, "big")
+    info += bytes(16)  # unspecified PCM MD5, legal for a live encoder
+    metadata = b"\x80" + b"\x00\x00\x22" + info
+    return b"fLaC" + metadata + b"".join(frames)
+
+
+FLAC_STREAM = make_flac()
+FLAC_FRAMES = 80 * 4096
 
 ALBUM = {
     "subsonic-response": {
@@ -45,6 +82,7 @@ ALBUM = {
                     "track": 1,
                     "suffix": "mp3",
                     "isDir": False,
+                    "starred": "2024-01-01T00:00:00Z",
                 },
                 {
                     "id": "tr2",
@@ -56,6 +94,57 @@ ALBUM = {
                     "suffix": "mp3",
                     "isDir": False,
                 },
+            ],
+        },
+    }
+}
+
+PLAYLISTS = {
+    "subsonic-response": {
+        "status": "ok",
+        "version": "1.16.1",
+        "playlists": {
+            "playlist": [
+                {"id": "pl1", "name": "Road Trip", "songCount": 2},
+            ]
+        },
+    }
+}
+
+STARRED = {
+    "subsonic-response": {
+        "status": "ok",
+        "version": "1.16.1",
+        "starred2": {
+            "song": [
+                {"id": "tr1", "title": "First Track", "artist": "Tester", "starred": "2024-01-01T00:00:00Z"},
+            ],
+            "album": [
+                {"id": "al1", "name": "Test Album", "artist": "Tester", "starred": "2024-01-01T00:00:00Z"},
+            ],
+        },
+    }
+}
+
+GENRES = {
+    "subsonic-response": {
+        "status": "ok",
+        "version": "1.16.1",
+        "genres": {
+            "genre": [
+                {"value": "Rock", "songCount": 5},
+            ]
+        },
+    }
+}
+
+SEARCH = {
+    "subsonic-response": {
+        "status": "ok",
+        "version": "1.16.1",
+        "searchResult3": {
+            "song": [
+                {"id": "tr1", "title": "First Track", "artist": "Tester", "suffix": "mp3"},
             ],
         },
     }
@@ -78,8 +167,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - the base name
         if self.path.startswith("/rest/getAlbum.view"):
             self.send_body(json.dumps(ALBUM).encode(), "application/json")
+        elif self.path.startswith("/rest/getPlaylists.view"):
+            self.send_body(json.dumps(PLAYLISTS).encode(), "application/json")
+        elif self.path.startswith("/rest/getStarred2.view"):
+            self.send_body(json.dumps(STARRED).encode(), "application/json")
+        elif self.path.startswith("/rest/getGenres.view"):
+            self.send_body(json.dumps(GENRES).encode(), "application/json")
+        elif self.path.startswith("/rest/search3.view"):
+            self.send_body(json.dumps(SEARCH).encode(), "application/json")
         elif self.path.startswith("/rest/stream.view"):
-            self.send_body(STREAM, "audio/mpeg")
+            if "format=flac" in self.path:
+                self.send_body(FLAC_STREAM, "audio/flac")
+            else:
+                self.send_body(STREAM, "audio/mpeg")
         else:
             self.send_body(
                 b'{"subsonic-response":{"status":"ok","version":"1.16.1"}}',

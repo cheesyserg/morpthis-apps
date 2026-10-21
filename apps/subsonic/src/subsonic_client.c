@@ -117,7 +117,7 @@ bool subsonic_configure(const subsonic_credentials_t *credentials, subsonic_qual
 		memset(&c, 0, sizeof(c));
 		return false;
 	}
-	if (q.format < SUBSONIC_FORMAT_MP3 || q.format > SUBSONIC_FORMAT_RAW) {
+	if (q.format < SUBSONIC_FORMAT_MP3 || q.format > SUBSONIC_FORMAT_FLAC) {
 		q.format = SUBSONIC_FORMAT_MP3;
 	}
 	if (q.max_bitrate < 64 || q.max_bitrate > 320) {
@@ -160,7 +160,7 @@ subsonic_quality_t subsonic_quality(void) {
 }
 
 void subsonic_set_quality(subsonic_quality_t q) {
-	if (q.format < SUBSONIC_FORMAT_MP3 || q.format > SUBSONIC_FORMAT_RAW) {
+	if (q.format < SUBSONIC_FORMAT_MP3 || q.format > SUBSONIC_FORMAT_FLAC) {
 		q.format = SUBSONIC_FORMAT_MP3;
 	}
 	if (q.max_bitrate < 64 || q.max_bitrate > 320) {
@@ -243,14 +243,19 @@ static bool request_url(const char *endpoint, const char *key, const char *value
 bool subsonic_stream_url(const char *id, subsonic_quality_t q, char *out, size_t size,
 						 char *error, size_t error_size) {
 	reason(error, error_size, "");
-	if (!out || !size || !id || !id[0] || q.format < SUBSONIC_FORMAT_MP3 || q.format > SUBSONIC_FORMAT_RAW ||
+	if (!out || !size || !id || !id[0] || q.format < SUBSONIC_FORMAT_MP3 ||
+		q.format > SUBSONIC_FORMAT_FLAC ||
 		!request_url("stream", "id", id, out, size, error, error_size)) {
 		return false;
 	}
 	size_t used = strlen(out);
-	const char *format = q.format == SUBSONIC_FORMAT_RAW ? "raw" : q.format == SUBSONIC_FORMAT_OPUS ? "opus" : "mp3";
-	int n = q.format == SUBSONIC_FORMAT_RAW ? snprintf(out + used, size - used, "&format=%s", format) :
-			 snprintf(out + used, size - used, "&format=%s&maxBitRate=%d", format, q.max_bitrate);
+	const char *format = q.format == SUBSONIC_FORMAT_RAW ? "raw"
+						 : q.format == SUBSONIC_FORMAT_OPUS ? "opus"
+						 : q.format == SUBSONIC_FORMAT_FLAC ? "flac"
+						 : "mp3";
+	bool lossless = q.format == SUBSONIC_FORMAT_RAW || q.format == SUBSONIC_FORMAT_FLAC;
+	int n = lossless ? snprintf(out + used, size - used, "&format=%s", format)
+					 : snprintf(out + used, size - used, "&format=%s&maxBitRate=%d", format, q.max_bitrate);
 	if (n < 0 || (size_t)n >= size - used) {
 		reason(error, error_size, "The request URL is too long.");
 		return false;
@@ -258,12 +263,20 @@ bool subsonic_stream_url(const char *id, subsonic_quality_t q, char *out, size_t
 	return true;
 }
 
-static bool api(const char *endpoint, const char *key, const char *value, char **body,
-				json_doc_t *doc, int *response, char *error, size_t size) {
+static bool api_extra(const char *endpoint, const char *key, const char *value, const char *extra,
+					  char **body, json_doc_t *doc, int *response, char *error, size_t size) {
 	reason(error, size, "");
 	char url[SUBSONIC_URL_MAX];
 	if (!request_url(endpoint, key, value, url, sizeof(url), error, size)) {
 		return false;
+	}
+	if (extra && extra[0]) {
+		size_t used = strlen(url);
+		int n = snprintf(url + used, sizeof(url) - used, "&%s", extra);
+		if (n < 0 || (size_t)n >= sizeof(url) - used) {
+			reason(error, size, "The request URL is too long.");
+			return false;
+		}
 	}
 	int status = 0;
 	size_t len = 0;
@@ -306,6 +319,48 @@ static bool api(const char *endpoint, const char *key, const char *value, char *
 	return ok;
 }
 
+static bool api(const char *endpoint, const char *key, const char *value, char **body,
+				json_doc_t *doc, int *response, char *error, size_t size) {
+	return api_extra(endpoint, key, value, NULL, body, doc, response, error, size);
+}
+
+bool subsonic_star(subsonic_entry_kind_t kind, const char *id, bool on, char *error, size_t size) {
+	const char *key = kind == SUBSONIC_ALBUM ? "albumId"
+					  : kind == SUBSONIC_ARTIST ? "artistId"
+					  : kind == SUBSONIC_TRACK ? "id"
+					  : NULL;
+	if (!key || !id || !id[0]) {
+		reason(error, size, "This item cannot be starred.");
+		return false;
+	}
+	char *body = NULL;
+	json_doc_t doc;
+	int response;
+	bool ok = api(on ? "star" : "unstar", key, id, &body, &doc, &response, error, size);
+	if (ok) {
+		json_free(&doc);
+		free(body);
+	}
+	return ok;
+}
+
+bool subsonic_scrobble(const char *id, bool submission, char *error, size_t size) {
+	if (!id || !id[0]) {
+		reason(error, size, "The track has no identifier.");
+		return false;
+	}
+	char *body = NULL;
+	json_doc_t doc;
+	int response;
+	bool ok = api_extra("scrobble", "id", id, submission ? "submission=true" : "submission=false",
+						&body, &doc, &response, error, size);
+	if (ok) {
+		json_free(&doc);
+		free(body);
+	}
+	return ok;
+}
+
 bool subsonic_ping(char *error, size_t size) {
 	char *body = NULL;
 	json_doc_t doc;
@@ -343,10 +398,15 @@ static bool identifier(const json_doc_t *doc, int obj, char *out, size_t size) {
 static bool entry(const json_doc_t *doc, int obj, subsonic_entry_kind_t kind, subsonic_entry_t *out) {
 	memset(out, 0, sizeof(*out));
 	out->kind = kind;
-	if (!identifier(doc, obj, out->id, sizeof(out->id))) {
+	if (kind == SUBSONIC_GENRE) {
+		// A genre has no id; its name is what getSongsByGenre expects.
+		json_obj_str(doc, obj, "value", out->id, sizeof(out->id));
+		json_obj_str(doc, obj, "value", out->title, sizeof(out->title));
+	}
+	if (!out->id[0] && !identifier(doc, obj, out->id, sizeof(out->id))) {
 		return false;
 	}
-	if (!json_obj_str(doc, obj, "title", out->title, sizeof(out->title))) {
+	if (!out->title[0] && !json_obj_str(doc, obj, "title", out->title, sizeof(out->title))) {
 		json_obj_str(doc, obj, "name", out->title, sizeof(out->title));
 	}
 	if (!out->title[0]) {
@@ -358,6 +418,7 @@ static bool entry(const json_doc_t *doc, int obj, subsonic_entry_kind_t kind, su
 	long duration = json_obj_long(doc, obj, "duration", 0);
 	out->duration = duration > 0 && duration <= INT_MAX ? (int)duration : 0;
 	out->track_number = (int)json_obj_long(doc, obj, "track", 0);
+	out->starred = json_get(doc, obj, "starred") >= 0;
 	return true;
 }
 
@@ -406,7 +467,7 @@ int subsonic_browse(subsonic_browse_t browse, const char *id, int offset, subson
 		reason(error, size, "Invalid browse request.");
 		return -1;
 	}
-	const char *endpoint, *key = NULL;
+	const char *endpoint, *key = NULL, *extra = NULL;
 	switch (browse) {
 	case SUBSONIC_BROWSE_FOLDERS: endpoint = "getMusicFolders"; break;
 	case SUBSONIC_BROWSE_INDEXES: endpoint = "getIndexes"; key = "musicFolderId"; break;
@@ -414,12 +475,25 @@ int subsonic_browse(subsonic_browse_t browse, const char *id, int offset, subson
 	case SUBSONIC_BROWSE_ARTISTS: endpoint = "getArtists"; break;
 	case SUBSONIC_BROWSE_ARTIST: endpoint = "getArtist"; key = "id"; break;
 	case SUBSONIC_BROWSE_ALBUM: endpoint = "getAlbum"; key = "id"; break;
+	case SUBSONIC_BROWSE_ALBUMS: endpoint = "getAlbumList2"; extra = "type=alphabeticalByName&size=200"; break;
+	case SUBSONIC_BROWSE_PLAYLISTS: endpoint = "getPlaylists"; break;
+	case SUBSONIC_BROWSE_PLAYLIST: endpoint = "getPlaylist"; key = "id"; break;
+	case SUBSONIC_BROWSE_STARRED: endpoint = "getStarred2"; break;
+	case SUBSONIC_BROWSE_RANDOM: endpoint = "getRandomSongs"; extra = "size=200"; break;
+	case SUBSONIC_BROWSE_NEWEST: endpoint = "getAlbumList2"; extra = "type=newest&size=200"; break;
+	case SUBSONIC_BROWSE_GENRES: endpoint = "getGenres"; break;
+	case SUBSONIC_BROWSE_GENRE: endpoint = "getSongsByGenre"; key = "genre"; extra = "count=200"; break;
+	case SUBSONIC_BROWSE_SEARCH:
+		endpoint = "search3";
+		key = "query";
+		extra = "songCount=100&albumCount=100&artistCount=100";
+		break;
 	default: return -1;
 	}
 	char *body = NULL;
 	json_doc_t doc;
 	int response;
-	if (!api(endpoint, key, id, &body, &doc, &response, error, size)) {
+	if (!api_extra(endpoint, key, id, extra, &body, &doc, &response, error, size)) {
 		return -1;
 	}
 	page_t page = {entries, offset, limit, 0, 0, false};
@@ -440,6 +514,28 @@ int subsonic_browse(subsonic_browse_t browse, const char *id, int offset, subson
 		array(&doc, json_path(&doc, response, "directory.child"), SUBSONIC_TRACK, true, &page);
 	} else if (browse == SUBSONIC_BROWSE_ARTIST) {
 		array(&doc, json_path(&doc, response, "artist.album"), SUBSONIC_ALBUM, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_ALBUM) {
+		array(&doc, json_path(&doc, response, "album.song"), SUBSONIC_TRACK, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_ALBUMS || browse == SUBSONIC_BROWSE_NEWEST) {
+		array(&doc, json_path(&doc, response, "albumList2.album"), SUBSONIC_ALBUM, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_PLAYLISTS) {
+		array(&doc, json_path(&doc, response, "playlists.playlist"), SUBSONIC_PLAYLIST, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_PLAYLIST) {
+		array(&doc, json_path(&doc, response, "playlist.entry"), SUBSONIC_TRACK, true, &page);
+	} else if (browse == SUBSONIC_BROWSE_STARRED) {
+		array(&doc, json_path(&doc, response, "starred2.song"), SUBSONIC_TRACK, false, &page);
+		array(&doc, json_path(&doc, response, "starred2.album"), SUBSONIC_ALBUM, false, &page);
+		array(&doc, json_path(&doc, response, "starred2.artist"), SUBSONIC_ARTIST, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_RANDOM) {
+		array(&doc, json_path(&doc, response, "randomSongs.song"), SUBSONIC_TRACK, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_GENRES) {
+		array(&doc, json_path(&doc, response, "genres.genre"), SUBSONIC_GENRE, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_GENRE) {
+		array(&doc, json_path(&doc, response, "songsByGenre.song"), SUBSONIC_TRACK, false, &page);
+	} else if (browse == SUBSONIC_BROWSE_SEARCH) {
+		array(&doc, json_path(&doc, response, "searchResult3.song"), SUBSONIC_TRACK, false, &page);
+		array(&doc, json_path(&doc, response, "searchResult3.album"), SUBSONIC_ALBUM, false, &page);
+		array(&doc, json_path(&doc, response, "searchResult3.artist"), SUBSONIC_ARTIST, false, &page);
 	} else {
 		array(&doc, json_path(&doc, response, "album.song"), SUBSONIC_TRACK, false, &page);
 	}

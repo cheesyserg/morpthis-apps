@@ -1,10 +1,10 @@
 // Host-side integration test for the Subsonic app's client and playback path.
 //
 // It links the real subsonic_client.c, stream_player.c and vendored HTTP/JSON/
-// MD5/dr_mp3 objects. The SDK calls the player makes are stubbed here: the DAC
-// counts frames instead of playing them, and a posted callback runs on the
-// worker thread instead of the GUI thread. tests/integration.py supplies a
-// loopback server.
+// MD5/dr_mp3/dr_flac objects. The SDK calls the player makes are stubbed here:
+// the DAC counts frames instead of playing them, and a posted callback runs on
+// the worker thread instead of the GUI thread. tests/integration.py supplies a
+// loopback server with an MP3 and a real FLAC stream.
 
 #include <morpthis/morpthis.h>
 
@@ -85,6 +85,9 @@ static void on_event(stream_event_kind_t kind, const char *message,
 					 const stream_track_t *track, void *user) {
 	(void)track;
 	(void)user;
+	if (kind == STREAM_EVENT_STARTED || kind == STREAM_EVENT_LISTENED) {
+		return;
+	}
 	pthread_mutex_lock(&event_lock);
 	if (kind == STREAM_EVENT_FINISHED) {
 		finished = true;
@@ -164,8 +167,29 @@ int main(int argc, char **argv) {
 		check(entries[0].kind == SUBSONIC_TRACK, "the first entry is a track");
 		check(strcmp(entries[0].title, "First Track") == 0, "the first title");
 		check(strcmp(entries[0].artist, "Tester") == 0, "the first artist");
+		check(entries[0].starred, "the starred flag is read");
 		check(strcmp(entries[1].id, "tr2") == 0, "the second id");
 	}
+
+	count = subsonic_browse(SUBSONIC_BROWSE_PLAYLISTS, NULL, 0, entries, SUBSONIC_PAGE_SIZE,
+							&more, error, sizeof(error));
+	check(count == 1 && entries[0].kind == SUBSONIC_PLAYLIST, "playlists are parsed");
+	check(count == 1 && strcmp(entries[0].title, "Road Trip") == 0, "the playlist name");
+
+	count = subsonic_browse(SUBSONIC_BROWSE_STARRED, NULL, 0, entries, SUBSONIC_PAGE_SIZE,
+							&more, error, sizeof(error));
+	check(count == 2, "starred songs and albums are both returned");
+	check(count == 2 && entries[0].kind == SUBSONIC_TRACK && entries[1].kind == SUBSONIC_ALBUM,
+		  "starred keeps songs before albums");
+
+	count = subsonic_browse(SUBSONIC_BROWSE_GENRES, NULL, 0, entries, SUBSONIC_PAGE_SIZE,
+							&more, error, sizeof(error));
+	check(count == 1 && entries[0].kind == SUBSONIC_GENRE, "genres are parsed");
+	check(count == 1 && strcmp(entries[0].title, "Rock") == 0, "the genre value becomes the title");
+
+	count = subsonic_browse(SUBSONIC_BROWSE_SEARCH, "first", 0, entries, SUBSONIC_PAGE_SIZE,
+							&more, error, sizeof(error));
+	check(count == 1 && entries[0].kind == SUBSONIC_TRACK, "search songs are parsed");
 
 	subsonic_credentials_t invalid = credentials;
 	snprintf(invalid.server, sizeof(invalid.server), "ftp://127.0.0.1");
@@ -232,6 +256,43 @@ int main(int argc, char **argv) {
 	pthread_mutex_lock(&event_lock);
 	check(!finished && !failed, "Stop did not report a completion or a failure");
 	pthread_mutex_unlock(&event_lock);
+
+	// Lossless: the client asks the server for a FLAC transcode and stream_player
+	// decodes it with dr_flac. The fixture is 80 * 4096 frames.
+	subsonic_quality_t flac_quality = {SUBSONIC_FORMAT_FLAC, 0};
+	check(subsonic_configure(&credentials, flac_quality, error, sizeof(error)), error);
+	pthread_mutex_lock(&event_lock);
+	finished = false;
+	failed = false;
+	pthread_mutex_unlock(&event_lock);
+
+	snprintf(track.id, sizeof(track.id), "flac1");
+	snprintf(track.title, sizeof(track.title), "Lossless Track");
+	snprintf(track.suffix, sizeof(track.suffix), "flac");
+	track.format = SUBSONIC_FORMAT_FLAC;
+	check(stream_player_start(&track), "FLAC playback start");
+
+	pthread_mutex_lock(&event_lock);
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 20;
+	while (!finished && !failed) {
+		if (pthread_cond_timedwait(&event_cond, &event_lock, &deadline) != 0) {
+			break;
+		}
+	}
+	done = finished;
+	did_fail = failed;
+	pthread_mutex_unlock(&event_lock);
+	check(done, did_fail ? failure : "FLAC playback finished before the deadline");
+
+	pthread_mutex_lock(&audio_lock);
+	frames = audio_frames;
+	rate = audio_rate;
+	channels = audio_channels;
+	pthread_mutex_unlock(&audio_lock);
+	check(frames == 80 * 4096, "the exact FLAC PCM frame count");
+	check(rate == 44100, "the FLAC sample rate was used");
+	check(channels == 2, "the FLAC channel count was used");
 
 	stream_player_shutdown();
 

@@ -86,14 +86,18 @@ bool settings_load(subsonic_settings_t *out, char *error, size_t error_size) {
 
 	char format[16] = "mp3";
 	json_obj_str(&doc, root, "format", format, sizeof(format));
-	if (format[0] && strcasecmp(format, "mp3") != 0) {
-		// The app carries dr_mp3 and nothing else. Saying so now is better than
-		// opening a stream the decoder cannot read.
-		reason(error, error_size, "This app decodes MP3 only; set \"format\": \"mp3\" in settings.json.");
+	if (strcasecmp(format, "mp3") == 0) {
+		out->quality.format = SUBSONIC_FORMAT_MP3;
+	} else if (strcasecmp(format, "flac") == 0) {
+		out->quality.format = SUBSONIC_FORMAT_FLAC;
+	} else if (strcasecmp(format, "raw") == 0) {
+		out->quality.format = SUBSONIC_FORMAT_RAW;
+	} else {
+		reason(error, error_size,
+			   "This app decodes MP3 and FLAC; set \"format\" to \"mp3\", \"flac\" or \"raw\".");
 		json_free(&doc);
 		return false;
 	}
-	out->quality.format = SUBSONIC_FORMAT_MP3;
 
 	long bitrate = json_obj_long(&doc, root, "max_bitrate", 256);
 	if (bitrate < 64) bitrate = 64;
@@ -159,6 +163,13 @@ static bool append_string(char *out, size_t size, size_t *used, const char *text
 	return append(out, size, used, "\"");
 }
 
+static const char *format_name(subsonic_format_t format) {
+	return format == SUBSONIC_FORMAT_FLAC ? "flac"
+			: format == SUBSONIC_FORMAT_RAW ? "raw"
+			: format == SUBSONIC_FORMAT_OPUS ? "opus"
+			: "mp3";
+}
+
 bool settings_save(const subsonic_settings_t *in) {
 	if (!in) {
 		return false;
@@ -167,13 +178,16 @@ bool settings_save(const subsonic_settings_t *in) {
 	size_t used = 0;
 	text[0] = '\0';
 
+	char format_line[48];
+	snprintf(format_line, sizeof(format_line), ",\n  \"format\": \"%s\",\n  \"max_bitrate\": ",
+			 format_name(in->quality.format));
 	bool ok = append(text, sizeof(text), &used, "{\n  \"server\": ") &&
 			  append_string(text, sizeof(text), &used, in->credentials.server) &&
 			  append(text, sizeof(text), &used, ",\n  \"username\": ") &&
 			  append_string(text, sizeof(text), &used, in->credentials.username) &&
 			  append(text, sizeof(text), &used, ",\n  \"password\": ") &&
 			  append_string(text, sizeof(text), &used, in->credentials.password) &&
-			  append(text, sizeof(text), &used, ",\n  \"format\": \"mp3\",\n  \"max_bitrate\": ");
+			  append(text, sizeof(text), &used, format_line);
 	char number[16];
 	snprintf(number, sizeof(number), "%d", in->quality.max_bitrate);
 	ok = ok && append(text, sizeof(text), &used, number) &&

@@ -1,10 +1,10 @@
 {
   "id": "subsonic",
   "name": "Subsonic",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "subsonic",
   "icon": "icon.png",
-  "description": "Stream music from a Subsonic or Gonic server",
+  "description": "Browse, search and stream MP3 or lossless FLAC from Subsonic/Gonic",
   "category": "app",
   "tier": "heavy",
   "min_player": 1
