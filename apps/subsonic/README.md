@@ -17,6 +17,14 @@ player's HTTP/TLS stack as vendored sources. That is the point of the test: if
 streaming belongs in an app, the next step is an SDK networking call rather
 than every streaming app copying `http.c` and `tls.c`.
 
+API 2 is the version this app targets (`min_player: 2`). It adds three things
+the client needs: 24/32-bit PCM output, the status-bar playing flag, and
+background operation. A 24-bit FLAC is written as left-justified S32, which the
+player hands to the built-in DAC as S24, so it is bit-perfect; 16-bit FLAC and
+MP3 stay at 16 bits, exactly as the player's own decoder treats them. Pressing
+BACK while music is loaded leaves the app in the background instead of closing
+it, and the player's status bar shows it is still playing.
+
 ## Settings
 
 API 1 has no text-entry widget, so the account lives in a file. On the first
@@ -47,7 +55,7 @@ changed it over ADB while the app was running.
 | --- | --- |
 | `server` | Base URL, with any reverse-proxy prefix. `http://` or `https://`; a pasted `/rest` suffix is removed. |
 | `username`, `password` | The Subsonic account. The password is stored in plain text on the card; use a dedicated account. |
-| `format` | `mp3` (default), `flac` (server transcodes to lossless FLAC) or `raw` (the original file; only FLAC and MP3 originals are decoded). |
+| `format` | `mp3` (default), `flac` (server transcodes to lossless FLAC) or `raw` (the original file; only FLAC and MP3 originals are decoded). Use `raw` when the server's FLAC transcoder is set to 16 bits and the library has 24-bit files. |
 | `max_bitrate` | 64–320 kbps, used only when `format` is `mp3`. The **Quality** button cycles 256 → 320 → FLAC. |
 | `tls_verify` | `strict` (default) or `relaxed`. Relaxed accepts a self-signed certificate or an unknown issuer, but still checks the name and the dates. |
 | `ca_bundle` | Optional absolute path to a PEM bundle. `<card>/.local/cacert.pem` and `/etc/ssl/cert.pem` are checked when this is empty. |
@@ -74,7 +82,7 @@ row is **Up**, **Stop** and **More**.
 | **More** | Opens the menu: **Queue**, **Star current**, **Settings**, **Back**. |
 | PLAY/PAUSE | Pauses and resumes the current stream. |
 | NEXT / PREV | Moves through the play queue, not the list on screen. |
-| BACK | Goes back one app screen; on the main screen it leaves the app. |
+| BACK | Goes back one app screen; on the main screen it leaves the app, or keeps it playing in the background when a track is loaded. |
 | Volume | Still the player's volume, not the app's. |
 
 Tapping a track queues every track in the list being looked at, starting with
@@ -98,7 +106,9 @@ end of a listen of at least thirty seconds are reported to the server with
 This is a working client with a deliberately small footprint, not a complete
 Subsonic replacement:
 
-- MP3 and FLAC. Opus is not decoded; choose MP3 or FLAC on the server.
+- MP3 and FLAC. Opus is not decoded; choose MP3 or FLAC on the server. Hi-res
+  is whatever the server sends: a 24-bit FLAC is played at 32-bit output, but a
+  transcoder configured for 16-bit FLAC will send 16 bits.
 - The first 200 entries of each view. There is no "load more" row yet.
 - No cover art, seeking or gapless playback. Playlists can be browsed and
   played, but not created or edited from the device.
@@ -116,8 +126,8 @@ Subsonic replacement:
 - IPv4 only, like the player's own network stack.
 - The app asks for the `heavy` tier: the player stops its own playback and
   releases its caches before the app loads. The decoder and the JSON response
-  are the app's main allocations; FLAC adds dr_flac's state (tens of KB) and
-  the same 16-bit PCM buffer as MP3.
+  are the app's main allocations; FLAC adds dr_flac's state (tens of KB) and a
+  PCM buffer that is 16-bit for MP3 or 32-bit for a 24-bit FLAC.
 
 ## How it is put together
 
@@ -126,7 +136,7 @@ Subsonic replacement:
 | `src/main.c` | Screens, browsing state, queue, star, search and settings toggles. |
 | `src/subsonic_client.c` | REST client: token auth, browse endpoints, stream URL, star, scrobble. |
 | `src/browse_worker.c` | One worker thread for browse requests. |
-| `src/stream_player.c` | One worker thread for HTTP → dr_mp3/dr_flac → `morpthis_audio_write`. |
+| `src/stream_player.c` | One worker thread for HTTP → dr_mp3/dr_flac → `morpthis_audio_write_pcm`. |
 | `src/settings.c` | Reading and writing `settings.json`. |
 | `src/vendor/` | The player's `http.c`/`tls.c` (adapted to the app), `json.c`, `md5.c`, `dr_mp3.h` and `dr_flac.h`. |
 
@@ -135,13 +145,17 @@ thread touches widgets. `morpthis_app_shutdown()` stops and joins them before
 the player unloads the shared object, including when USB mass storage closes
 the app to share the card.
 
-The player opens at its usual PCM depth: `morpthis_audio_open(..., 0)` selects
-the deep frame-based sizing (8 x 4096 frames, about 750 ms) regardless of the
-local playback `[audio] buffer_time_ms` setting. That depth is what rides out a
-network stall without an underrun; the player drops it on stop, so leaving the
-app is not delayed by it. Explicit time-based requests (the games' short
+The player opens at its usual PCM depth: `morpthis_audio_open_ex(..., 0)`
+selects the deep frame-based sizing (8 x 4096 frames, about 750 ms) regardless
+of the local playback `[audio] buffer_time_ms` setting. That depth is what rides
+out a network stall without an underrun; the player drops it on stop, so leaving
+the app is not delayed by it. Explicit time-based requests (the games' short
 game buffer) are aligned to the AIC's DMA and fall back to the frame-based
 depth when the driver refuses them, so a 44.1 kHz track does not fail at open.
+The depth is chosen per track from the decoder: 32 bits when FLAC reports more
+than 16 bits per sample, 16 bits otherwise. If the output refuses S32 the app
+retries at 16 and says so in the log, which is the same fallback local playback
+uses.
 
 The vendored `http.c` adds `http_abort_all()`, which shuts down the app's open
 sockets instead of closing them; the owning thread still closes them. That is
@@ -164,12 +178,12 @@ make package                     # device toolchain + mksquashfs
 
 `test` is the SDK host smoke test: it opens the app menu and the settings screen
 and leaves. `test-integration` starts a Subsonic-compatible server on
-`127.0.0.1`, serves a valid silent MP3 and a real FLAC stream over HTTP and,
-when `openssl` is available, over HTTPS with a self-signed certificate in
+`127.0.0.1`, serves a valid silent MP3 and a real 24-bit FLAC stream over HTTP
+and, when `openssl` is available, over HTTPS with a self-signed certificate in
 relaxed mode. It exercises the real client, the JSON parser, dr_mp3, dr_flac
-and the PCM writes, checks the exact 327,680-frame lossless decode, and stops a
-stream part-way to check that cancellation and teardown complete. It is not part
-of `make test` because it needs a listening loopback.
+and the PCM writes, checks the exact 327,680-frame lossless decode at 32-bit
+output, and stops a stream part-way to check that cancellation and teardown
+complete. It is not part of `make test` because it needs a listening loopback.
 
 `make package` writes `dist/subsonic.pkgmerp`; copy it to
 `Apps/pkgmerps/subsonic.pkgmerp`. The writable folder, including

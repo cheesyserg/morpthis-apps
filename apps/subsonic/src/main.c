@@ -1013,6 +1013,13 @@ static void on_button(morpthis_button_t button, morpthis_input_action_t action, 
 		} else {
 			// The player handles its own chrome, but the host runner and a player
 			// that delivers BACK before quitting both need this to be the way out.
+			// A music app that is playing stays loaded instead: the chevron then
+			// hides its screens and the sound keeps going, and the status bar
+			// shows it is still playing. With nothing loaded there is nothing to
+			// keep, so BACK closes the app.
+			if ((g_playing || g_paused) && morpthis_app_background()) {
+				break;
+			}
 			morpthis_app_quit();
 		}
 		break;
@@ -1255,9 +1262,9 @@ int morpthis_app_main(const morpthis_app_t *app) {
 }
 
 // The player calls this before unloading the shared object, including when USB
-// mass-storage mode closes the app to share the card. No UI calls, and it must
-// be idempotent: the worker threads stop and are joined while their code is
-// still mapped.
+// mass-storage mode closes the app to share the card. It runs on a worker
+// thread with a three-second bound: no UI calls, and it must be idempotent.
+// The worker threads stop and are joined while their code is still mapped.
 MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
 	if (g_shutting_down) {
 		return;

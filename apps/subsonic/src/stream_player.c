@@ -236,6 +236,7 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	source_t source = {.http = &http, .generation = generation, .io_error = false};
 	int rate;
 	int channels;
+	int source_bits = 16;
 	if (flac_stream) {
 		flac = drflac_open(flac_read, flac_seek, NULL, &source, NULL);
 		if (!flac) {
@@ -249,6 +250,7 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 		}
 		rate = (int)flac->sampleRate;
 		channels = (int)flac->channels;
+		source_bits = (int)flac->bitsPerSample;
 	} else {
 		mp3 = calloc(1, sizeof(*mp3));
 		if (!mp3) {
@@ -270,7 +272,25 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 		channels = (int)mp3->channels;
 	}
 
-	if (rate <= 0 || channels < 1 || channels > 2 || !morpthis_audio_open(rate, channels, AUDIO_BUFFER_MS)) {
+	// Hi-res follows the source, exactly as the player's own decoder does: a
+	// FLAC deeper than 16 bits is written as S32 left-justified, which the
+	// built-in DAC consumes as S24 and plays bit-perfect. MP3 and 16-bit FLAC
+	// stay at 16 bits, where there is nothing to preserve. If the device
+	// refuses S32, fall back to 16 rather than leaving a hi-res track silent.
+	int out_bits = source_bits > 16 ? 32 : 16;
+	if (rate <= 0 || channels < 1 || channels > 2) {
+		out_bits = 0;
+	}
+	if (out_bits && !morpthis_audio_open_ex(rate, channels, out_bits, AUDIO_BUFFER_MS)) {
+		if (out_bits == 32) {
+			morpthis_logw("subsonic", "the device refused S32; playing at 16 bits");
+			out_bits = 16;
+		}
+		if (out_bits == 16 && !morpthis_audio_open_ex(rate, channels, 16, AUDIO_BUFFER_MS)) {
+			out_bits = 0;
+		}
+	}
+	if (!out_bits) {
 		if (flac) {
 			drflac_close(flac);
 		} else {
@@ -285,9 +305,22 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 
 	// Now playing, best effort. The GUI thread hands this to the action worker:
 	// a scrobble must never hold up the thread that feeds the DAC.
+	morpthis_logi("subsonic", "%s %d-bit at %d Hz, output %d-bit", flac_stream ? "FLAC" : "MP3",
+				  source_bits, rate, out_bits);
+	// The user may have pressed pause while the stream was still connecting:
+	// open_ex marks the output playing, so correct the indicator to the state
+	// the loop is about to honour.
+	pthread_mutex_lock(&player.lock);
+	bool start_paused = player.paused;
+	pthread_mutex_unlock(&player.lock);
+	morpthis_audio_set_playing(!start_paused);
 	post_event(generation, STREAM_EVENT_STARTED, "", track);
 
-	int16_t pcm[DECODE_FRAMES * 2];
+	// One union, because a track is either 16-bit or 32-bit for its whole life.
+	union {
+		int16_t s16[DECODE_FRAMES * 2];
+		int32_t s32[DECODE_FRAMES * 2];
+	} pcm;
 	uint64_t frames_played = 0;
 	bool failed = false;
 	const char *why = NULL;
@@ -302,8 +335,14 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			break;
 		}
 
-		uint64_t got = flac_stream ? drflac_read_pcm_frames_s16(flac, DECODE_FRAMES, pcm)
-								   : drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm);
+		uint64_t got;
+		if (out_bits == 32) {
+			got = drflac_read_pcm_frames_s32(flac, DECODE_FRAMES, pcm.s32);
+		} else if (flac_stream) {
+			got = drflac_read_pcm_frames_s16(flac, DECODE_FRAMES, pcm.s16);
+		} else {
+			got = drmp3_read_pcm_frames_s16(mp3, DECODE_FRAMES, pcm.s16);
+		}
 		if (got == 0) {
 			if (source.io_error) {
 				failed = true;
@@ -311,7 +350,7 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			}
 			break;
 		}
-		size_t wrote = morpthis_audio_write(pcm, (size_t)got);
+		size_t wrote = morpthis_audio_write_pcm(&pcm, (size_t)got);
 		if (wrote < (size_t)got) {
 			if (!aborted(generation)) {
 				failed = true;
@@ -442,6 +481,10 @@ void stream_player_stop(void) {
 	}
 	pthread_cond_broadcast(&player.cond);
 	pthread_mutex_unlock(&player.lock);
+
+	// The worker closes the output when it notices the abort; the status bar
+	// should not claim sound during that window.
+	morpthis_audio_set_playing(false);
 }
 
 void stream_player_pause(bool paused) {
@@ -452,6 +495,9 @@ void stream_player_pause(bool paused) {
 	player.paused = paused;
 	pthread_cond_broadcast(&player.cond);
 	pthread_mutex_unlock(&player.lock);
+
+	// The status bar follows the user's intent now, not one buffer later.
+	morpthis_audio_set_playing(!paused);
 }
 
 void stream_player_shutdown(void) {

@@ -1,11 +1,11 @@
 {
   "id": "subsonic",
   "name": "Subsonic",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "entry": "subsonic",
   "icon": "icon.png",
-  "description": "Browse, search and stream MP3 or lossless FLAC from Subsonic/Gonic",
+  "description": "Browse, search and stream MP3 or lossless FLAC (up to 24-bit) from Subsonic/Gonic",
   "category": "app",
   "tier": "heavy",
-  "min_player": 1
+  "min_player": 2
 }

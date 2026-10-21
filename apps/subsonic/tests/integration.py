@@ -41,21 +41,24 @@ def crc(data: bytes, bits: int, polynomial: int) -> int:
 
 
 def make_flac() -> bytes:
-    """80 blocks x 4096 samples, 44.1 kHz stereo 16-bit, verbatim frames.
+    """80 blocks x 4096 samples, 44.1 kHz stereo 24-bit, verbatim frames.
 
     A real STREAMINFO and real frame CRCs, so dr_flac decodes it as a normal
-    lossless stream. The exact PCM frame count is 80 * 4096.
+    lossless stream. The exact PCM frame count is 80 * 4096. Twenty-four bits
+    is the point of the fixture: the app must ask the output for 32-bit
+    left-justified samples rather than truncate it to 16.
     """
     count, block = 80, 4096
     frames = []
     for i in range(count):
-        header = b"\xff\xf8\x79\x18" + bytes([i]) + struct.pack(">H", block - 1)
+        # 0x1C: independent stereo, 24 bits per sample.
+        header = b"\xff\xf8\x79\x1c" + bytes([i]) + struct.pack(">H", block - 1)
         header += bytes([crc(header, 8, 0x07)])
-        frame = header + (b"\x02" + bytes(block * 2)) * 2
+        frame = header + (b"\x02" + bytes(block * 3)) * 2
         frames.append(frame + struct.pack(">H", crc(frame, 16, 0x8005)))
     size = len(frames[0])
     info = struct.pack(">HH", block, block) + size.to_bytes(3, "big") * 2
-    info += ((44100 << 44) | (1 << 41) | (15 << 36) | (count * block)).to_bytes(8, "big")
+    info += ((44100 << 44) | (1 << 41) | (23 << 36) | (count * block)).to_bytes(8, "big")
     info += bytes(16)  # unspecified PCM MD5, legal for a live encoder
     metadata = b"\x80" + b"\x00\x00\x22" + info
     return b"fLaC" + metadata + b"".join(frames)
