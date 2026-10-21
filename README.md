@@ -151,9 +151,12 @@ calculator.pkgmerp
 
 Uncompressed is deliberate: the player mounts the image read-only through a
 loop device, and the kernel then serves its data straight from the card through
-the page cache, with no decompression workspace. The file is larger than a zip;
-the player has more card than RAM. `mksquashfs` from `squashfs-tools` must be on
-the build machine.
+the page cache. The file is larger than a zip; the player has more card than
+RAM. The superblock has to name a compressor the device kernel knows, and that
+kernel's rootfs uses LZO, so packages use `-comp lzo` with `-b 4096`. Every
+block is still stored uncompressed; `-b 4096` only keeps the driver's one-block
+input buffer small. `mksquashfs` from `squashfs-tools` must be on the build
+machine.
 
 The name carries no version. Copy `dist/<id>.pkgmerp` to
 `Apps/pkgmerps/<id>.pkgmerp` on the card; the app's writable files already live

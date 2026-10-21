@@ -9,8 +9,10 @@
 # that runs.
 #
 # Uncompressed is deliberate. The kernel serves the data straight from the card
-# through the page cache, with no decompression workspace; the image is larger,
-# but this player has more card than RAM.
+# through the page cache, so no data is decompressed; the image is larger, but
+# this player has more card than RAM. The superblock still has to name an
+# algorithm the kernel knows; see the mksquashfs line below for why that is LZO
+# and why the block size is small.
 #
 # The device build needs the pinned cross toolchain, exactly as `make device`
 # does. MORPTHIS_MODE can be overridden for a host-only dry run, but a .pkgmerp
@@ -84,23 +86,40 @@ rm -f "$out"
 
 # -noI -noD -noF -noX stores the inode table, data blocks, fragments and xattrs
 # without compression, which is what keeps the kernel from decompressing on the
-# way to the page cache. -comp gzip names the metadata compressor the device's
-# squashfs 4.0 driver is guaranteed to know. -all-root makes every entry
-# root-owned, as the player runs; the mode bits the build set are kept.
+# way to the page cache. The superblock still has to name a compression
+# algorithm: the device kernel recognises the ID and refuses the mount when it
+# was built without that decompressor. Its rootfs is LZO, so LZO is the one it
+# has; zlib is not built in, and a -comp gzip image fails with
+#     squashfs: SQUASHFS error: Filesystem uses "zlib" compression.
+# even though every block is stored uncompressed. -b 4096 keeps the driver's
+# decompressor input buffer (one block, allocated at mount) small; no block in
+# the image is actually compressed. -all-root makes every entry root-owned, as
+# the player runs; the mode bits the build set are kept.
 if ! mksquashfs "$stage_dir" "$out" \
-	-noappend -noI -noD -noF -noX -comp gzip -all-root; then
+	-noappend -noI -noD -noF -noX -comp lzo -b 4096 -all-root; then
 	echo "package: mksquashfs failed for $id" >&2
 	rm -f "$out"
 	exit 1
 fi
 
-# Cheap proof that the image has a superblock the kernel will accept.
+# Cheap proof that the image has a superblock the kernel will accept. The
+# device kernel has the LZO decompressor (its own rootfs is LZO) and not zlib;
+# every block here is uncompressed, but the superblock's compressor ID is still
+# checked at mount time, so a gzip image would be refused on the card.
 if command -v unsquashfs >/dev/null 2>&1; then
-	if ! unsquashfs -s "$out" >/dev/null 2>&1; then
+	summary=$(unsquashfs -s "$out" 2>&1) || {
 		echo "package: $out is not a readable squashfs image" >&2
 		rm -f "$out"
 		exit 1
-	fi
+	}
+	case "$summary" in
+		*"Compression lzo"*) ;;
+		*)
+			echo "package: $out does not name the device kernel's LZO decompressor" >&2
+			rm -f "$out"
+			exit 1
+			;;
+	esac
 fi
 
 echo "package: wrote $out"
