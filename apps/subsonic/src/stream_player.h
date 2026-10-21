@@ -15,6 +15,8 @@ typedef struct {
 	char artist[128];
 	char album[200];
 	char suffix[16];
+	char cover_art[SUBSONIC_ID_MAX];
+	int duration_ms;
 	subsonic_format_t format;
 } stream_track_t;
 
@@ -23,6 +25,7 @@ typedef enum {
 	STREAM_EVENT_FAILED,
 	STREAM_EVENT_STARTED,  // now playing
 	STREAM_EVENT_LISTENED, // past the thirty-second mark
+	STREAM_EVENT_PROGRESS, // one second of audio has been sent
 } stream_event_kind_t;
 
 typedef void (*stream_event_cb)(stream_event_kind_t kind, const char *message,
@@ -41,5 +44,10 @@ void stream_player_stop(void);
 void stream_player_pause(bool paused);
 
 void stream_player_shutdown(void);
+
+// How far into the current track the worker has fed, and the duration it was
+// told about. Both in milliseconds; zero when nothing is loaded.
+int stream_player_position_ms(void);
+int stream_player_duration_ms(void);
 
 #endif

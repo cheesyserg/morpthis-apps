@@ -47,6 +47,9 @@ typedef struct {
 
 	stream_event_cb cb;
 	void *user;
+
+	int position_ms;
+	int duration_ms;
 } player_t;
 
 static player_t player;
@@ -311,10 +314,9 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	// a scrobble must never hold up the thread that feeds the DAC.
 	morpthis_logi("subsonic", "%s %d-bit at %d Hz, output %d-bit", flac_stream ? "FLAC" : "MP3",
 				  source_bits, rate, out_bits);
-	// The user may have pressed pause while the stream was still connecting:
-	// open_ex marks the output playing, so correct the indicator to the state
-	// the loop is about to honour.
 	pthread_mutex_lock(&player.lock);
+	player.position_ms = 0;
+	player.duration_ms = track->duration_ms;
 	bool start_paused = player.paused;
 	pthread_mutex_unlock(&player.lock);
 	morpthis_audio_set_playing(!start_paused);
@@ -326,6 +328,7 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 		int32_t s32[DECODE_FRAMES * 2];
 	} pcm;
 	uint64_t frames_played = 0;
+	uint64_t next_progress = (uint64_t)rate;
 	bool failed = false;
 	const char *why = NULL;
 	for (;;) {
@@ -363,6 +366,14 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			break;
 		}
 		frames_played += got;
+		if (frames_played >= next_progress) {
+			int position = (int)(frames_played * 1000u / (uint64_t)rate);
+			pthread_mutex_lock(&player.lock);
+			player.position_ms = position;
+			pthread_mutex_unlock(&player.lock);
+			post_event(generation, STREAM_EVENT_PROGRESS, "", track);
+			next_progress += (uint64_t)rate;
+		}
 	}
 
 	morpthis_audio_close();
@@ -456,6 +467,10 @@ bool stream_player_start(const stream_track_t *track) {
 	player.has_request = true;
 	player.abort = true; // stop whatever is running
 	player.paused = false;
+	// The page switches to the new title before the handshake finishes; a
+	// position left over from the previous track would be shown against it.
+	player.position_ms = 0;
+	player.duration_ms = track->duration_ms;
 	player.generation++;
 	if (player.http) {
 		http_stream_wake(player.http);
@@ -526,4 +541,18 @@ void stream_player_shutdown(void) {
 	http_abort_all();
 	pthread_join(player.thread, NULL);
 	player.started = false;
+}
+
+int stream_player_position_ms(void) {
+	pthread_mutex_lock(&player.lock);
+	int position = player.position_ms;
+	pthread_mutex_unlock(&player.lock);
+	return position;
+}
+
+int stream_player_duration_ms(void) {
+	pthread_mutex_lock(&player.lock);
+	int duration = player.duration_ms;
+	pthread_mutex_unlock(&player.lock);
+	return duration;
 }

@@ -89,7 +89,8 @@ static void on_event(stream_event_kind_t kind, const char *message,
 					 const stream_track_t *track, void *user) {
 	(void)track;
 	(void)user;
-	if (kind == STREAM_EVENT_STARTED || kind == STREAM_EVENT_LISTENED) {
+	if (kind == STREAM_EVENT_STARTED || kind == STREAM_EVENT_LISTENED ||
+		kind == STREAM_EVENT_PROGRESS) {
 		return;
 	}
 	pthread_mutex_lock(&event_lock);

@@ -23,6 +23,7 @@
 #include <strings.h>
 
 #include "browse_worker.h"
+#include "cover_worker.h"
 #include "settings.h"
 #include "stream_player.h"
 #include "subsonic.h"
@@ -60,18 +61,34 @@ static const root_item_t ROOT_ITEMS[] = {
 
 static int g_width;
 static int g_height;
+static int g_full_height; // a screen without the title row, for the now-playing page
 
 static morpthis_screen_t *g_main_screen;
 static morpthis_screen_t *g_settings_screen;
 static morpthis_screen_t *g_more_screen;
 static morpthis_screen_t *g_queue_screen;
 static morpthis_screen_t *g_search_screen;
+static morpthis_screen_t *g_now_screen;
 static morpthis_widget_t *g_status;
 static morpthis_widget_t *g_list;
-static morpthis_widget_t *g_stop_button;
 static morpthis_widget_t *g_more_star;
 static morpthis_widget_t *g_queue_list;
 static morpthis_widget_t *g_search_label;
+
+// The mini-player row at the top of the library and the full now-playing page.
+static morpthis_widget_t *g_now_bar;
+static morpthis_widget_t *g_now_cover;
+static morpthis_widget_t *g_now_title;
+static morpthis_widget_t *g_now_artist;
+static morpthis_widget_t *g_now_progress;
+static morpthis_widget_t *g_now_time;
+static morpthis_widget_t *g_now_play;
+static char g_now_artist_text[128];
+static int g_now_duration_secs;
+static char g_now_cover_id[SUBSONIC_ID_MAX];
+static char g_now_cover_path[32];
+static unsigned g_now_cover_applied; // the generation whose file is on the page
+static unsigned g_cover_generation;
 
 static morpthis_widget_t *g_settings_label;
 static morpthis_widget_t *g_tls_button;
@@ -106,6 +123,9 @@ static bool g_settings_valid;
 
 static void update_more_screen(void);
 static void update_queue_screen(void);
+static void update_now_bar(void);
+static void update_now_screen(void);
+static void show_now_playing(morpthis_widget_t *widget, void *user);
 static void enqueue_scrobble(const char *id, bool submission);
 static void open_settings(morpthis_widget_t *widget, void *user);
 static void open_more(morpthis_widget_t *widget, void *user);
@@ -214,6 +234,163 @@ static void show_error(const char *where, const char *message) {
 }
 
 // ---------------------------------------------------------------------------
+// Now playing
+// ---------------------------------------------------------------------------
+
+static void format_time(int seconds, char *out, size_t size) {
+	if (seconds < 0) {
+		seconds = 0;
+	}
+	snprintf(out, size, "%d:%02d", seconds / 60, seconds % 60);
+}
+
+static void update_now_bar(void) {
+	if (!g_now_bar || !g_list) {
+		return;
+	}
+	bool show = (g_playing || g_paused) && g_now_playing[0] != '\0';
+	if (!show) {
+		morpthis_widget_set_visible(g_now_bar, false);
+		if (g_status) {
+			morpthis_widget_set_visible(g_status, true);
+		}
+		morpthis_widget_set_pos(g_list, 0, 34);
+		morpthis_widget_set_size(g_list, g_width, g_height - 34 - 44);
+		return;
+	}
+
+	morpthis_list_clear(g_now_bar);
+	// The mini-player takes the status line's place, so the browse feedback
+	// moves into its detail line: a view change must not look like a hang just
+	// because a track is playing.
+	const char *detail = g_browsing ? "Loading..."
+								 : (g_now_artist_text[0] ? g_now_artist_text : NULL);
+	morpthis_list_add_entry(g_now_bar, g_now_playing, detail,
+							g_now_cover_path[0] ? g_now_cover_path : NULL, true);
+	morpthis_list_set_playing(g_now_bar, 0);
+	morpthis_widget_set_visible(g_now_bar, true);
+	if (g_status) {
+		morpthis_widget_set_visible(g_status, false);
+	}
+	morpthis_widget_set_pos(g_list, 0, 48);
+	morpthis_widget_set_size(g_list, g_width, g_height - 48 - 44);
+}
+
+static void update_now_screen(void) {
+	if (!g_now_screen) {
+		return;
+	}
+	bool have = g_now_playing[0] != '\0';
+	if (g_now_title) {
+		char title[128];
+		clip(title, sizeof(title), have ? g_now_playing : "Nothing playing", 110);
+		morpthis_widget_set_text(g_now_title, title);
+	}
+	if (g_now_artist) {
+		char artist[128];
+		clip(artist, sizeof(artist), have ? g_now_artist_text : "", 110);
+		morpthis_widget_set_text(g_now_artist, artist);
+	}
+	if (g_now_cover) {
+		// A track with no cover must not leave the previous one on display.
+		bool art = have && g_now_cover_path[0] != '\0';
+		morpthis_widget_set_visible(g_now_cover, art);
+		// Decoding is synchronous and the page is refreshed once a second while
+		// it is open, so only hand the picture over when it is a new download.
+		// The file name is the same for every track; the generation is what says
+		// its contents changed.
+		if (art && g_now_cover_applied != g_cover_generation) {
+			morpthis_image_set_source(g_now_cover, g_now_cover_path);
+			g_now_cover_applied = g_cover_generation;
+		}
+	}
+
+	int position = stream_player_position_ms() / 1000;
+	int duration = g_now_duration_secs > 0 ? g_now_duration_secs : stream_player_duration_ms() / 1000;
+	if (duration > 0 && position > duration) {
+		position = duration;
+	}
+	if (g_now_progress) {
+		morpthis_widget_set_visible(g_now_progress, duration > 0);
+		if (duration > 0) {
+			int value = (int)((long long)position * 1000 / duration);
+			morpthis_slider_set_value(g_now_progress, value);
+		}
+	}
+	if (g_now_time) {
+		char elapsed[16], total[16], text[40];
+		format_time(position, elapsed, sizeof(elapsed));
+		if (duration > 0) {
+			format_time(duration, total, sizeof(total));
+			snprintf(text, sizeof(text), "%s / %s", elapsed, total);
+		} else {
+			snprintf(text, sizeof(text), "%s", elapsed);
+		}
+		morpthis_widget_set_text(g_now_time, text);
+	}
+	if (g_now_play) {
+		morpthis_widget_set_icon(g_now_play,
+							 (g_playing && !g_paused) ? MORPTHIS_ICON_PAUSE : MORPTHIS_ICON_PLAY);
+	}
+}
+
+static void show_now_playing(morpthis_widget_t *widget, void *user) {
+	(void)widget;
+	(void)user;
+	if (!g_now_screen) {
+		return;
+	}
+	update_now_screen();
+	morpthis_screen_load(g_now_screen);
+}
+
+static const subsonic_entry_t *current_entry(void) {
+	if (g_queue_index < 0 || g_queue_index >= g_queue_count) {
+		return NULL;
+	}
+	return &g_queue[g_queue_index];
+}
+
+// Tells the player's control centre and status bar what this app is playing.
+// The player copies the strings, so it is safe to call from here on the GUI
+// thread; it is also safe before the output is open, which is when a track has
+// just been chosen but the HTTP and TLS handshake is still running.
+static void publish_track(bool playing) {
+	const subsonic_entry_t *entry = current_entry();
+	if (!entry) {
+		morpthis_audio_set_track(NULL, false);
+		return;
+	}
+	morpthis_track_t track;
+	memset(&track, 0, sizeof(track));
+	snprintf(track.title, sizeof(track.title), "%s", entry->title);
+	snprintf(track.artist, sizeof(track.artist), "%s", entry->artist);
+	snprintf(track.album, sizeof(track.album), "%s", entry->album);
+	track.duration_ms = entry->duration > 0 ? entry->duration * 1000 : 0;
+	morpthis_audio_set_track(&track, playing);
+}
+
+static void on_cover(const cover_result_t *result, void *user) {
+	(void)user;
+	if (g_shutting_down || !result || result->generation != g_cover_generation) {
+		return;
+	}
+	if (strcmp(result->id, g_now_cover_id) != 0) {
+		return;
+	}
+	if (result->error[0]) {
+		morpthis_logd("subsonic", "cover: %s", result->error);
+		return;
+	}
+	snprintf(g_now_cover_path, sizeof(g_now_cover_path), "%s", result->path);
+	if (g_now_cover) {
+		morpthis_image_set_source(g_now_cover, g_now_cover_path);
+		g_now_cover_applied = g_cover_generation;
+	}
+	update_now_bar();
+}
+
+// ---------------------------------------------------------------------------
 // Browsing
 // ---------------------------------------------------------------------------
 
@@ -229,6 +406,7 @@ static void request_view(void) {
 	morpthis_screen_set_title(g_main_screen, current_view_title());
 	morpthis_list_clear(g_list);
 	refresh_status();
+	update_now_bar();
 	browse_worker_request((int)g_view_generation, view->kind, view->id, 0);
 }
 
@@ -296,6 +474,7 @@ static void show_root(void) {
 	morpthis_screen_set_title(g_main_screen, current_view_title());
 	render_entries();
 	refresh_status();
+	update_now_bar();
 }
 
 static void show_not_configured(void) {
@@ -316,6 +495,7 @@ static void on_browse_done(const browse_result_t *result, void *user) {
 		return;
 	}
 	g_browsing = false;
+	update_now_bar();
 
 	if (result->error[0]) {
 		show_error("browse", result->error);
@@ -436,6 +616,7 @@ static bool play_queue_at(int index) {
 	snprintf(track.album, sizeof(track.album), "%s", entry->album);
 	snprintf(track.suffix, sizeof(track.suffix), "%s", entry->suffix);
 	track.format = format;
+	track.duration_ms = entry->duration > 0 ? entry->duration * 1000 : 0;
 
 	if (!stream_player_start(&track)) {
 		show_error("playback", "Could not start the player.");
@@ -447,7 +628,23 @@ static bool play_queue_at(int index) {
 	g_have_error = false;
 	g_queue_index = index;
 	snprintf(g_now_playing, sizeof(g_now_playing), "%s", entry->title);
+	// The now-playing page and the mini-player show the artist; an album with no
+	// artist tag is more useful than an empty line.
+	clip(g_now_artist_text, sizeof(g_now_artist_text),
+		 entry->artist[0] ? entry->artist : entry->album, sizeof(g_now_artist_text) - 1);
+	g_now_duration_secs = entry->duration > 0 ? entry->duration : 0;
+	snprintf(g_now_cover_id, sizeof(g_now_cover_id), "%s", entry->cover_art);
+	g_now_cover_path[0] = '\0';
+	// The worker cancels any download for the previous track; an empty id leaves
+	// it with nothing to fetch. The old file is not shown because the path above
+	// was cleared.
+	g_cover_generation++;
+	g_now_cover_applied = 0;
+	cover_worker_request(g_cover_generation, g_now_cover_id);
+	publish_track(true);
 	update_playing_mark();
+	update_now_bar();
+	update_now_screen();
 	refresh_status();
 	return true;
 }
@@ -491,6 +688,48 @@ static void play_relative(int delta) {
 	morpthis_toast(delta > 0 ? "End of the queue." : "Start of the queue.");
 }
 
+static void toggle_play_pause(void) {
+	if (!g_playing) {
+		if (g_queue_count > 0) {
+			play_queue_at(g_queue_index >= 0 ? g_queue_index : 0);
+		}
+		return;
+	}
+	g_paused = !g_paused;
+	stream_player_pause(g_paused);
+	morpthis_audio_set_playing(!g_paused);
+	update_now_screen();
+	update_now_bar();
+	refresh_status();
+}
+
+static void now_play_cb(morpthis_widget_t *widget, void *user) {
+	(void)widget;
+	(void)user;
+	toggle_play_pause();
+}
+
+static void now_prev_cb(morpthis_widget_t *widget, void *user) {
+	(void)widget;
+	(void)user;
+	play_relative(-1);
+	update_now_screen();
+}
+
+static void now_next_cb(morpthis_widget_t *widget, void *user) {
+	(void)widget;
+	(void)user;
+	play_relative(1);
+	update_now_screen();
+}
+
+static void now_bar_selected(morpthis_widget_t *list, int index, void *user) {
+	(void)list;
+	(void)index;
+	(void)user;
+	show_now_playing(NULL, NULL);
+}
+
 static void on_stream_event(stream_event_kind_t kind, const char *message,
 							const stream_track_t *track, void *user) {
 	(void)user;
@@ -501,11 +740,23 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 		if (track) {
 			enqueue_scrobble(track->id, false);
 		}
+		// The output is open now, so the status glyph can follow. Publish again
+		// with the current pause state rather than trusting the one from the
+		// moment the track was chosen.
+		publish_track(!g_paused);
 		return;
 	}
 	if (kind == STREAM_EVENT_LISTENED) {
 		if (track) {
 			enqueue_scrobble(track->id, true);
+		}
+		return;
+	}
+	if (kind == STREAM_EVENT_PROGRESS) {
+		// One event a second. Redraw only the page that shows time; rebuilding
+		// the library list here would cost far more than the label it updates.
+		if (morpthis_screen_active() == g_now_screen) {
+			update_now_screen();
 		}
 		return;
 	}
@@ -515,13 +766,21 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 		if (g_queue_index >= 0 && play_queue_at(g_queue_index + 1)) {
 			return;
 		}
+		// Keep the last track on the page, as the player's own now-playing page
+		// does, but release the status bar.
+		publish_track(false);
 		update_playing_mark();
+		update_now_bar();
+		update_now_screen();
 		refresh_status();
 		return;
 	}
 	g_playing = false;
 	g_paused = false;
+	publish_track(false);
 	update_playing_mark();
+	update_now_bar();
+	update_now_screen();
 	show_error("playback", message[0] ? message : "Playback failed.");
 }
 
@@ -536,7 +795,10 @@ static void stop_playback(morpthis_widget_t *widget, void *user) {
 	g_playing = false;
 	g_paused = false;
 	g_have_error = false;
+	morpthis_audio_set_track(NULL, false);
 	update_playing_mark();
+	update_now_bar();
+	update_now_screen();
 	refresh_status();
 }
 
@@ -775,8 +1037,11 @@ static void queue_clear(morpthis_widget_t *widget, void *user) {
 	g_queue_index = -1;
 	g_playing = false;
 	g_paused = false;
+	morpthis_audio_set_track(NULL, false);
 	update_queue_screen();
 	update_playing_mark();
+	update_now_bar();
+	update_now_screen();
 	refresh_status();
 }
 
@@ -1066,25 +1331,28 @@ static void on_button(morpthis_button_t button, morpthis_input_action_t action, 
 	}
 	switch (button) {
 	case MORPTHIS_BUTTON_PLAY_PAUSE:
-		if (!g_playing) {
-			if (g_queue_count > 0) {
-				play_queue_at(g_queue_index >= 0 ? g_queue_index : 0);
-			}
-		} else {
-			g_paused = !g_paused;
-			stream_player_pause(g_paused);
-			refresh_status();
-		}
+		// The player's control centre sends the same button; one path keeps the
+		// status glyph, the mini-player and the now-playing page in step.
+		toggle_play_pause();
 		break;
 	case MORPTHIS_BUTTON_NEXT:
 		play_relative(1);
+		update_now_screen();
 		break;
 	case MORPTHIS_BUTTON_PREV:
 		play_relative(-1);
+		update_now_screen();
+		break;
+	case MORPTHIS_BUTTON_NOW_PLAYING:
+		show_now_playing(NULL, NULL);
 		break;
 	case MORPTHIS_BUTTON_BACK: {
 		morpthis_screen_t *active = morpthis_screen_active();
-		if (active && active == g_search_screen) {
+		bool stays = true;
+		if (active && active == g_now_screen) {
+			morpthis_screen_load(g_main_screen);
+			refresh_status();
+		} else if (active && active == g_search_screen) {
 			morpthis_screen_load(g_main_screen);
 			refresh_status();
 		} else if (active && active == g_settings_screen) {
@@ -1102,10 +1370,17 @@ static void on_button(morpthis_button_t button, morpthis_input_action_t action, 
 			// chevron hides its screens and the sound keeps going, and the status
 			// bar shows it is still playing. With nothing loaded there is nothing
 			// to keep, so BACK closes the app.
+			stays = false;
 			if ((g_playing || g_paused) && morpthis_app_background()) {
 				break;
 			}
 			morpthis_app_quit();
+		}
+		if (stays) {
+			// The player's back guard quits an app after BACK unless told the app
+			// stayed on purpose; without this the chevron would close the app
+			// instead of walking up the library.
+			morpthis_app_back_handled();
 		}
 		break;
 	}
@@ -1133,15 +1408,28 @@ static bool create_main_screen(void) {
 	morpthis_widget_set_size(g_list, g_width, g_height - 34 - 44);
 	morpthis_list_set_select_cb(g_list, on_select, NULL);
 
+	// The mini-player: the playing track, in the same row the library uses, on
+	// the strip the status line occupies. It replaces the status line while a
+	// track is loaded and opens the full page when tapped.
+	g_now_bar = morpthis_list_create(g_main_screen);
+	morpthis_widget_set_pos(g_now_bar, 0, 0);
+	morpthis_widget_set_size(g_now_bar, g_width, 44);
+	morpthis_list_set_select_cb(g_now_bar, now_bar_selected, NULL);
+	morpthis_widget_set_visible(g_now_bar, false);
+
+	// The title row's action: the player's play glyph, opening the now-playing
+	// page. The player's own down-chevron still sits to its right.
+	morpthis_screen_add_corner_button(g_main_screen, MORPTHIS_ICON_PLAY, show_now_playing, NULL);
+
 	int width = (g_width - 6) / 2;
 	if (width < 50) {
 		return false;
 	}
 	int y = g_height - 38;
 
-	g_stop_button = morpthis_button_create(g_main_screen, "Stop", stop_playback, NULL);
-	morpthis_widget_set_pos(g_stop_button, 0, y);
-	morpthis_widget_set_size(g_stop_button, width, 32);
+	morpthis_widget_t *stop = morpthis_button_create(g_main_screen, "Stop", stop_playback, NULL);
+	morpthis_widget_set_pos(stop, 0, y);
+	morpthis_widget_set_size(stop, width, 32);
 
 	morpthis_widget_t *more = morpthis_button_create(g_main_screen, "More", open_more, NULL);
 	morpthis_widget_set_pos(more, width + 6, y);
@@ -1195,20 +1483,24 @@ static bool create_more_screen(void) {
 		return false;
 	}
 
+	morpthis_widget_t *now = morpthis_button_create(g_more_screen, "Now playing", show_now_playing, NULL);
+	morpthis_widget_set_pos(now, 20, 0);
+	morpthis_widget_set_size(now, width, 36);
+
 	morpthis_widget_t *queue = morpthis_button_create(g_more_screen, "Queue", open_queue, NULL);
-	morpthis_widget_set_pos(queue, 20, 0);
+	morpthis_widget_set_pos(queue, 20, 40);
 	morpthis_widget_set_size(queue, width, 36);
 
 	g_more_star = morpthis_button_create(g_more_screen, "Star current", toggle_star, NULL);
-	morpthis_widget_set_pos(g_more_star, 20, 40);
+	morpthis_widget_set_pos(g_more_star, 20, 80);
 	morpthis_widget_set_size(g_more_star, width, 36);
 
 	morpthis_widget_t *settings = morpthis_button_create(g_more_screen, "Settings", open_settings, NULL);
-	morpthis_widget_set_pos(settings, 20, 80);
+	morpthis_widget_set_pos(settings, 20, 120);
 	morpthis_widget_set_size(settings, width, 36);
 
 	morpthis_widget_t *back = morpthis_button_create(g_more_screen, "Back", back_to_main, NULL);
-	morpthis_widget_set_pos(back, 20, 120);
+	morpthis_widget_set_pos(back, 20, 160);
 	morpthis_widget_set_size(back, width, 36);
 
 	return true;
@@ -1283,6 +1575,87 @@ static bool create_search_screen(void) {
 	return true;
 }
 
+// The player's now-playing page, scaled for the panel: sleeve, title, artist,
+// a position bar and the transport. The screen has no title row, so the whole
+// area under the status bar belongs to the page.
+static bool create_now_screen(void) {
+	g_now_screen = morpthis_screen_create_full("Now playing");
+	if (!g_now_screen) {
+		return false;
+	}
+
+	int full = g_full_height > 0 ? g_full_height : g_height;
+	const int margin = 12;
+
+	// The sleeve takes what the text and the transport row leave. A 240x320
+	// panel ends up with a square a little smaller than the cover in the
+	// player, which is what the page should look like.
+	int cover = g_width - 48;
+	int limit = full - 154;
+	if (cover > limit) {
+		cover = limit;
+	}
+	if (cover < 64) {
+		cover = 64;
+	}
+
+	int y = 8;
+	g_now_cover = morpthis_image_create(g_now_screen, "");
+	morpthis_widget_set_pos(g_now_cover, (g_width - cover) / 2, y);
+	morpthis_widget_set_size(g_now_cover, cover, cover);
+	y += cover + 6;
+
+	g_now_title = morpthis_label_create(g_now_screen, "Nothing playing");
+	morpthis_widget_set_pos(g_now_title, margin, y);
+	morpthis_widget_set_size(g_now_title, g_width - 2 * margin, 26);
+	morpthis_widget_set_text_size(g_now_title, 20);
+	morpthis_widget_set_text_align(g_now_title, MORPTHIS_TEXT_CENTER);
+	y += 26;
+
+	g_now_artist = morpthis_label_create(g_now_screen, "");
+	morpthis_widget_set_pos(g_now_artist, margin, y);
+	morpthis_widget_set_size(g_now_artist, g_width - 2 * margin, 22);
+	morpthis_widget_set_text_size(g_now_artist, 16);
+	morpthis_widget_set_text_dim(g_now_artist, true);
+	morpthis_widget_set_text_align(g_now_artist, MORPTHIS_TEXT_CENTER);
+	y += 22;
+
+	g_now_progress = morpthis_slider_create(g_now_screen, 0, 1000, 0, NULL, NULL);
+	morpthis_widget_set_pos(g_now_progress, margin, y);
+	morpthis_widget_set_size(g_now_progress, g_width - 2 * margin, 24);
+	// The server offers no range for a transcoded stream, so this is a position
+	// readout: it must not take a drag that cannot do anything.
+	morpthis_widget_set_enabled(g_now_progress, false);
+	y += 24;
+
+	g_now_time = morpthis_label_create(g_now_screen, "");
+	morpthis_widget_set_pos(g_now_time, margin, y);
+	morpthis_widget_set_size(g_now_time, g_width - 2 * margin, 18);
+	morpthis_widget_set_text_size(g_now_time, 14);
+	morpthis_widget_set_text_dim(g_now_time, true);
+	morpthis_widget_set_text_align(g_now_time, MORPTHIS_TEXT_CENTER);
+
+	// The same three controls as the player's own transport, in the same order.
+	const int side = 44;
+	const int gap = 10;
+	int total = side * 3 + gap * 2;
+	int x = (g_width - total) / 2;
+	int bottom = full - side;
+
+	morpthis_widget_t *prev =
+		morpthis_icon_button_create(g_now_screen, MORPTHIS_ICON_PREV, side, now_prev_cb, NULL);
+	morpthis_widget_set_pos(prev, x, bottom);
+
+	g_now_play = morpthis_icon_button_create(g_now_screen, MORPTHIS_ICON_PLAY, side, now_play_cb, NULL);
+	morpthis_widget_set_pos(g_now_play, x + side + gap, bottom);
+
+	morpthis_widget_t *next =
+		morpthis_icon_button_create(g_now_screen, MORPTHIS_ICON_NEXT, side, now_next_cb, NULL);
+	morpthis_widget_set_pos(next, x + 2 * (side + gap), bottom);
+
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -1317,6 +1690,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	morpthis_logi("subsonic", "starting, api %d", morpthis_app_api_version(app));
 	g_width = morpthis_ui_width();
 	g_height = morpthis_ui_height();
+	g_full_height = morpthis_ui_full_height();
 	if (g_width < 200 || g_height < 240) {
 		morpthis_loge("subsonic", "the display is too small (%dx%d)", g_width, g_height);
 		return 1;
@@ -1327,7 +1701,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	tls_set_card_root(morpthis_fs_card_root());
 
 	if (!create_main_screen() || !create_settings_screen() || !create_more_screen() ||
-		!create_queue_screen() || !create_search_screen()) {
+		!create_queue_screen() || !create_search_screen() || !create_now_screen()) {
 		morpthis_loge("subsonic", "could not create a screen");
 		return 1;
 	}
@@ -1341,6 +1715,12 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	if (!star_worker_init()) {
 		stream_player_shutdown();
 		browse_worker_shutdown();
+		return 1;
+	}
+	if (!cover_worker_init(on_cover, NULL)) {
+		stream_player_shutdown();
+		browse_worker_shutdown();
+		star_worker_shutdown();
 		return 1;
 	}
 
@@ -1361,7 +1741,9 @@ MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
 	}
 	g_shutting_down = true;
 	stream_player_shutdown();
+	cover_worker_shutdown();
 	browse_worker_shutdown();
 	star_worker_shutdown();
+	morpthis_audio_set_track(NULL, false);
 	morpthis_logi("subsonic", "stopped");
 }

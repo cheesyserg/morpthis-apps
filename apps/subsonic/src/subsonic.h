@@ -53,6 +53,7 @@ typedef struct {
 	char artist[128];
 	char album[200];
 	char suffix[16];
+	char cover_art[SUBSONIC_ID_MAX]; // getCoverArt id; empty when the server omitted it
 	int duration;
 	int track_number;
 	bool starred;
@@ -101,6 +102,11 @@ int subsonic_browse(subsonic_browse_t browse, const char *id, int offset,
 // v=1.16.1, c=morpthis, f=json; no plaintext password in a URL or a log.
 bool subsonic_stream_url(const char *id, subsonic_quality_t quality,
 						 char *out, size_t size, char *error, size_t error_size);
+
+// getCoverArt.view for `id`, at `size` pixels on the long edge (the server
+// scales it). Same auth and scheme as the stream URL.
+bool subsonic_cover_url(const char *id, int size, char *out, size_t out_size,
+						char *error, size_t error_size);
 
 // Stars or unstars a track, album or artist. Blocking; call it on a worker.
 bool subsonic_star(subsonic_entry_kind_t kind, const char *id, bool on,

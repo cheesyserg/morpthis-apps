@@ -116,6 +116,15 @@ Rules from the SDK:
 - If the app owns threads, a network connection or the raw audio output, export
   `morpthis_app_shutdown()` to stop them. The player calls it before unloading,
   including when USB mass-storage mode closes the app to share the card.
+- The chevron and the swipe-back deliver BACK and then quit the app. An app with
+  its own pages calls `morpthis_app_back_handled()` after loading the parent
+  screen; one that keeps working off screen calls `morpthis_app_background()`
+  instead. With neither, BACK is the way out.
+- A music app that takes the raw output can publish what it plays with
+  `morpthis_audio_set_track()`. The status bar and the control centre then follow
+  the app, their transport buttons arrive as ordinary button events, and a tap
+  on the card sends `MORPTHIS_BUTTON_NOW_PLAYING` so the app can show its own
+  now-playing page.
 - Log a start line and an exit line.
 
 ## 5. The icon

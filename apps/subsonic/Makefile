@@ -1,5 +1,6 @@
 APP_ID := subsonic
-APP_SRCS := src/main.c src/settings.c src/subsonic_client.c src/browse_worker.c src/stream_player.c \
+APP_SRCS := src/main.c src/settings.c src/subsonic_client.c src/browse_worker.c src/cover_worker.c \
+	src/stream_player.c \
 	src/vendor/json.c src/vendor/md5.c src/vendor/http.c src/vendor/tls.c \
 	src/vendor/dr_mp3_impl.c src/vendor/dr_flac_impl.c
 APP_INCLUDES := -Isrc/vendor
@@ -7,8 +8,8 @@ APP_LIBS := -lpthread -ldl
 # http.c and tls.c use strcasestr, res_init and MSG_NOSIGNAL.
 APP_CFLAGS := -D_GNU_SOURCE
 # The settings screen is reachable without a network or a server. More now
-# leads to the app menu; Settings is the first row after Queue and Star.
-APP_TEST_SCRIPT := sleep:200; click:More; sleep:100; click:Settings; sleep:100; click:Back; sleep:100; click:Back; sleep:100; press:back
+# leads to the app menu; Settings follows Now playing, Queue and Star.
+APP_TEST_SCRIPT := sleep:200; click:More; sleep:100; click:Now playing; sleep:100; press:back; sleep:100; click:More; sleep:100; click:Settings; sleep:100; click:Back; sleep:100; click:Back; sleep:100; press:back
 
 MORPTHIS_SDK ?= $(abspath ../../../morpthis-sdk)
 include $(MORPTHIS_SDK)/app.mk

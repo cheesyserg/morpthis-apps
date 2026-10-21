@@ -263,6 +263,28 @@ bool subsonic_stream_url(const char *id, subsonic_quality_t q, char *out, size_t
 	return true;
 }
 
+bool subsonic_cover_url(const char *id, int size, char *out, size_t out_size,
+						char *error, size_t error_size) {
+	reason(error, error_size, "");
+	if (!out || !out_size || !id || !id[0] ||
+		!request_url("getCoverArt", "id", id, out, out_size, error, error_size)) {
+		return false;
+	}
+	if (size < 32) {
+		size = 32;
+	}
+	if (size > 1024) {
+		size = 1024;
+	}
+	size_t used = strlen(out);
+	int n = snprintf(out + used, out_size - used, "&size=%d", size);
+	if (n < 0 || (size_t)n >= out_size - used) {
+		reason(error, error_size, "The request URL is too long.");
+		return false;
+	}
+	return true;
+}
+
 static bool api_extra(const char *endpoint, const char *key, const char *value, const char *extra,
 					  char **body, json_doc_t *doc, int *response, char *error, size_t size) {
 	reason(error, size, "");
@@ -415,6 +437,7 @@ static bool entry(const json_doc_t *doc, int obj, subsonic_entry_kind_t kind, su
 	json_obj_str(doc, obj, "artist", out->artist, sizeof(out->artist));
 	json_obj_str(doc, obj, "album", out->album, sizeof(out->album));
 	json_obj_str(doc, obj, "suffix", out->suffix, sizeof(out->suffix));
+	json_obj_str(doc, obj, "coverArt", out->cover_art, sizeof(out->cover_art));
 	long duration = json_obj_long(doc, obj, "duration", 0);
 	out->duration = duration > 0 && duration <= INT_MAX ? (int)duration : 0;
 	out->track_number = (int)json_obj_long(doc, obj, "track", 0);

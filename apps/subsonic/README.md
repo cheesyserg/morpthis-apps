@@ -17,9 +17,10 @@ player's HTTP/TLS stack as vendored sources. That is the point of the test: if
 streaming belongs in an app, the next step is an SDK networking call rather
 than every streaming app copying `http.c` and `tls.c`.
 
-API 2 is the version this app targets (`min_player: 2`). It adds three things
-the client needs: 24/32-bit PCM output, the status-bar playing flag, and
-background operation. A 24-bit FLAC is written as left-justified S32, which the
+API 2 is the version this app targets (`min_player: 2`). It adds what the
+client needs: 24/32-bit PCM output, the status-bar playing flag, background
+operation, the player's icon/text widgets, and a published track for the
+control centre. A 24-bit FLAC is written as left-justified S32, which the
 player hands to the built-in DAC as S24, so it is bit-perfect; 16-bit FLAC and
 MP3 stay at 16 bits, exactly as the player's own decoder treats them. Pressing
 BACK while music is loaded leaves the app in the background instead of closing
@@ -73,15 +74,29 @@ The quickest route to a working server:
 The first screen is a menu: **Artists**, **Albums**, **Folders**, **Playlists**,
 **Genres**, **Starred**, **Random**, **Newest** and **Search**. Tapping an artist
 shows albums, an album shows its tracks, and a track starts playing. The bottom
-row is **Stop** and **More**; the player's chevron goes up one level.
+row is **Stop** and **More**; the player's chevron, and the swipe-back, go up
+one level.
+
+While a track is loaded, the status line at the top of the library becomes a
+mini-player row with the cover, title and artist. Tapping it opens the
+now-playing page: a large cover, title and artist, elapsed/total time, and the
+player's own previous, play/pause and next glyphs. The play glyph in the
+heading row opens the same page. The cover is downloaded once per track into
+`merp_data/subsonic/covers/current.jpg`; the page and the mini-player read it
+from there.
+
+The track is also published to the player, so the status bar's play glyph and
+the control centre's now-playing card follow the app instead of the player's
+stopped queue. The card's transport buttons come back to the app, and tapping
+the card opens this app's now-playing page.
 
 | Control | Action |
 | --- | --- |
 | **Stop** | Stops playback; the queue is kept. |
-| **More** | Opens the menu: **Queue**, **Star current**, **Settings**, **Back**. |
+| **More** | Opens the menu: **Now playing**, **Queue**, **Star current**, **Settings**, **Back**. |
 | PLAY/PAUSE | Pauses and resumes the current stream. |
 | NEXT / PREV | Moves through the play queue, not the list on screen. |
-| BACK | Goes up one level in the library. At the root it leaves the app, or keeps it playing in the background when a track is loaded. |
+| BACK | Goes up one level in the library, from the now-playing page back to it, and back out of the app's other pages. At the root it leaves the app, or keeps it playing in the background when a track is loaded. |
 | Volume | Still the player's volume, not the app's. |
 
 Tapping a track queues every track in the list being looked at, starting with
@@ -115,9 +130,13 @@ Subsonic replacement:
   24-bit FLAC is played at 32-bit output, but a transcoder configured for
   16-bit FLAC will send 16 bits.
 - The first 200 entries of each view. There is no "load more" row yet.
-- No cover art, seeking or gapless playback. Playlists can be browsed and
-  played, but not created or edited from the device. Rows follow the player's
-  library layout (title, artist/detail, chevron) but not its artwork.
+- Cover art only for the current track, and only on the now-playing page and
+  the mini-player. Library rows follow the player's library layout (title,
+  artist/detail, chevron) without thumbnails, because downloading a cover for
+  every row of a 200-entry list would cost more RAM and time than it is worth
+  on this device.
+- No seeking or gapless playback. Playlists can be browsed and played, but not
+  created or edited from the device.
 - One stream at a time. Starting another track stops the first.
 - No look-ahead buffer: the decoder reads from the socket directly. A link
   that stalls can leave an audible gap. The player's built-in client used two
@@ -142,14 +161,15 @@ Subsonic replacement:
 | `src/main.c` | Screens, browsing state, queue, star, search and settings toggles. |
 | `src/subsonic_client.c` | REST client: token auth, browse endpoints, stream URL, star, scrobble. |
 | `src/browse_worker.c` | One worker thread for browse requests. |
+| `src/cover_worker.c` | One worker thread for the current track's cover art. |
 | `src/stream_player.c` | One worker thread for HTTP → dr_mp3/dr_flac → `morpthis_audio_write_pcm`. |
 | `src/settings.c` | Reading and writing `settings.json`. |
 | `src/vendor/` | The player's `http.c`/`tls.c` (adapted to the app), `json.c`, `md5.c`, `dr_mp3.h` and `dr_flac.h`. |
 
-Three workers post their results with `morpthis_app_post()`; only the GUI
-thread touches widgets. `morpthis_app_shutdown()` stops and joins them before
-the player unloads the shared object, including when USB mass storage closes
-the app to share the card.
+The workers post their results with `morpthis_app_post()`; only the GUI thread
+touches widgets. `morpthis_app_shutdown()` stops and joins them before the
+player unloads the shared object, including when USB mass storage closes the
+app to share the card.
 
 The player opens at its usual PCM depth: `morpthis_audio_open_ex(..., 0)`
 selects the deep frame-based sizing (8 x 4096 frames, about 750 ms) regardless
