@@ -135,13 +135,13 @@ and the minimum player build. The player does not download anything.
 
 - Every push and pull request validates every manifest and runs the host build
   and smoke tests.
-- Manual runs — and tags — build the device binaries, run the ABI check and
-  package the `.mapp` files. The job builds the pinned toolchain from the
-  player's `rockboxdev` scripts on the first run and restores it from the
-  Actions cache afterwards; no repository secret is required.
-- On a tag, the packages are also attached to the matching GitHub release when
-  one exists. The release tag names the app and version, for example
-  `calculator-v1.0.0`.
+- Device builds live in `morpthis-build`. That workflow checks this repository
+  out, builds the pinned MIPS toolchain from the player's `rockboxdev` scripts
+  (restored from the Actions cache afterwards), runs the ABI check and packages
+  the `.mapp` files; no repository secret is required.
+- On a tag, `morpthis-build` attaches the packages to the matching GitHub
+  release when one exists. The release tag names the app and version, for
+  example `calculator-v1.0.0`.
 
 ## What not to put here
 

@@ -1,12 +1,13 @@
 name: build
 
+# Manifest validation and the host build happen here. Device builds — the
+# pinned MIPS toolchain, the ABI check and the .mapp packages — live in
+# morpthis-build, which checks this repository out for them.
+
 on:
   push:
   pull_request:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   validate:
@@ -29,74 +30,3 @@ jobs:
           path: sdk
       - name: Build and test
         run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" test
-
-  # The device job builds the pinned cross toolchain from the player's
-  # rockboxdev scripts the first time and restores it from the Actions cache
-  # afterwards. No repository secret is needed.
-  device:
-    name: Device build, ABI check and packages
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch the SDK
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/morpthis-sdk
-          path: sdk
-      - name: Fetch the player's toolchain scripts
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/morpthis-player
-          path: player
-      - name: Install toolchain build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git pkg-config wget curl ca-certificates \
-            texinfo bison flex gawk gperf patch xz-utils bzip2 gzip \
-            autoconf automake libtool libtool-bin \
-            libgmp-dev libmpfr-dev libmpc-dev python3
-      - name: Restore the toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            toolchain
-            toolchain-downloads
-          key: morpthis-toolchain-${{ runner.os }}-${{ hashFiles('player/morpthis-player/rockboxdev/**', 'player/morpthis-player/Makefile') }}
-          restore-keys: |
-            morpthis-toolchain-${{ runner.os }}-
-      - name: Build the pinned toolchain
-        env:
-          RBDEV_HOST_PREFIX: ${{ github.workspace }}/toolchain
-          RBDEV_DOWNLOAD: ${{ github.workspace }}/toolchain-downloads
-        run: |
-          set -euo pipefail
-          if [ ! -x "$RBDEV_HOST_PREFIX/bin/mipsel-rockbox-linux-gnu-gcc" ]; then
-            cd player/morpthis-player
-            RBDEV_MORPTHIS_MINIMAL=1 bash ./rockboxdev/rockboxdev.sh
-          fi
-          echo "$RBDEV_HOST_PREFIX/bin" >> "$GITHUB_PATH"
-      - name: Build, check and package
-        run: |
-          make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" check-abi
-          make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" package
-      - name: Upload the packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: morpthis-apps-${{ github.sha }}
-          path: dist/*.mapp
-          if-no-files-found: error
-          retention-days: 14
-      - name: Attach packages to the release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "::notice::No release named $GITHUB_REF_NAME; packages are in the artifact."
-            exit 0
-          fi
-          gh release upload "$GITHUB_REF_NAME" dist/*.mapp --clobber
