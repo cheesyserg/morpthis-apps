@@ -104,6 +104,17 @@ void nes_set_notify(nes_notify_fn fn) {
 	g_notify = fn;
 }
 
+// InfoNES keeps its frame in RGB555 (0RRRRRGGGGGBBBBB), and bit 15 is its
+// backdrop flag, not colour. The panel is RGB565, so widen red and green and
+// drop the flag; blue is five bits in both.
+static inline uint16_t rgb555_to_565(uint16_t colour) {
+	unsigned r = (colour >> 10) & 0x1F;
+	unsigned g = (colour >> 5) & 0x1F;
+	unsigned b = colour & 0x1F;
+	unsigned g6 = (g << 1) | (g >> 4);
+	return (uint16_t)((r << 11) | (g6 << 5) | b);
+}
+
 void nes_backend_frame(const uint16_t *work, int width, int height) {
 	if (!work || !g_frame_back || g_geo.scale < 1) {
 		return;
@@ -117,7 +128,7 @@ void nes_backend_frame(const uint16_t *work, int width, int height) {
 	for (int sy = 0; sy < src_h; sy++) {
 		const uint16_t *row = work + (size_t)sy * (size_t)width;
 		for (int sx = 0; sx < src_w; sx++) {
-			uint16_t colour = row[sx];
+			uint16_t colour = rgb555_to_565(row[sx]);
 			for (int dy = 0; dy < scale; dy++) {
 				int ly = sy * scale + dy;
 				int x = g_geo.game_y0 + ly;

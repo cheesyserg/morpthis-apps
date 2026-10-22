@@ -45,19 +45,20 @@ MORPTHIS_DEFINE_API_VERSION();
 #define A_CX 228
 #define A_CY 180
 #define BUTTON_R 21
-#define PAUSE_CX 240
+// The pause target sits in the landscape top-left, away from the player's
+// back chevron and status-bar band, which run along the top edge in portrait
+// and so land in the landscape top-right.
+#define PAUSE_CX 18
 #define PAUSE_CY 18
 #define PAUSE_R 12
 
-// The touch overlay's palette, the same one the Doom port uses: a dark disc,
-// a light ring and arrows over it, all translucent so the picture stays
+// The touch overlay's palette, the same one the Doom port uses for its
+// buttons: a dark disc and a light ring, translucent so the picture stays
 // readable underneath.
 #define OVERLAY_DISC 0x2945
 #define OVERLAY_RING 0x6B4D
-#define OVERLAY_ARROW 0xC618
 #define ALPHA_DISC 90
 #define ALPHA_RING 170
-#define ALPHA_ARROW 190
 
 // Widget text sizes the player offers: 14, 16, 18, 20, 22, 24, 26, 32.
 #define SIZE_SMALL 14
@@ -94,6 +95,48 @@ typedef enum {
 	OWN_A,
 	OWN_B
 } touch_owner_t;
+
+// The five side keys the game can use, and the NES action each one carries.
+// POWER and BACK stay the player's pause/resume keys.
+typedef enum {
+	MAP_NEXT,
+	MAP_PREV,
+	MAP_PLAY_PAUSE,
+	MAP_VOLUME_UP,
+	MAP_VOLUME_DOWN,
+	MAP_COUNT
+} map_key_t;
+
+typedef enum {
+	ACT_NONE = 0,
+	ACT_A,
+	ACT_B,
+	ACT_SELECT,
+	ACT_START,
+	ACT_TURBO,
+	ACT_PAUSE,
+	ACT_COUNT
+} nes_action_t;
+
+static const int default_map[MAP_COUNT] = {
+	ACT_SELECT, ACT_TURBO, ACT_START, ACT_A, ACT_B,
+};
+
+static const char *const map_config_keys[MAP_COUNT] = {
+	"map.next", "map.prev", "map.play_pause", "map.volume_up", "map.volume_down",
+};
+
+static const char *const map_key_names[MAP_COUNT] = {
+	"NEXT", "PREV", "PLAY/PAUSE", "VOLUME UP", "VOLUME DOWN",
+};
+
+static const int map_row_order[MAP_COUNT] = {
+	MAP_VOLUME_UP, MAP_VOLUME_DOWN, MAP_PLAY_PAUSE, MAP_NEXT, MAP_PREV,
+};
+
+static const char *const action_names[ACT_COUNT] = {
+	"None", "A", "B", "Select", "Start", "Turbo", "Pause",
+};
 
 typedef struct {
 	int dcx, dcy, dr;
@@ -167,6 +210,8 @@ static morpthis_timer_t *pulse_timer;
 
 static bool sound_on = true;
 static bool touch_controls = true;
+static int key_map[MAP_COUNT];
+static morpthis_widget_t *mapping_rows[MAP_COUNT];
 static volatile bool shutting_down;
 
 static uint32_t accent_rgb;
@@ -696,39 +741,34 @@ static void ring(int cx, int cy, int radius, int thickness, uint16_t colour, int
 	}
 }
 
-// A triangular arm whose apex points away from the pad's centre. Direction:
-// 0 left, 1 right, 2 up, 3 down.
-static void fill_arrow(int cx, int cy, int direction, int radius, uint16_t colour, int alpha) {
-	int span = radius / 4;
-	int length = radius * 3 / 5;
+// D-pad: four translucent blocks in a cross. The block of a held direction
+// takes the accent colour, and the game stays visible through the rest.
+static void draw_dpad(controls_t c, int scale) {
+	int arm = c.dr;
+	int thick = (2 * c.dr) / 3;
+	int gap = 2 * scale;
+	uint16_t fill = 0xFFFF;
 
-	for (int d = 0; d <= length; d++) {
-		switch (direction) {
-		case 0: {
-			int half = span * d / length;
-			fill_rect(cx - span - length + d, cy - half, cx - span - length + d + 1,
-					  cy + half + 1, colour, alpha);
-			break;
-		}
-		case 1: {
-			int half = span * (length - d) / length;
-			fill_rect(cx + span + d, cy - half, cx + span + d + 1, cy + half + 1,
-					  colour, alpha);
-			break;
-		}
-		case 2: {
-			int half = span * d / length;
-			fill_rect(cx - half, cy - span - length + d, cx + half + 1,
-					  cy - span - length + d + 1, colour, alpha);
-			break;
-		}
-		default: {
-			int half = span * (length - d) / length;
-			fill_rect(cx - half, cy + span + d, cx + half + 1,
-					  cy + span + d + 1, colour, alpha);
-			break;
-		}
-		}
+	fill_rect(c.dcx - thick / 2, c.dcy - arm, c.dcx + thick / 2, c.dcy - gap, fill, 70);
+	fill_rect(c.dcx - thick / 2, c.dcy + gap, c.dcx + thick / 2, c.dcy + arm, fill, 70);
+	fill_rect(c.dcx - arm, c.dcy - thick / 2, c.dcx - gap, c.dcy + thick / 2, fill, 70);
+	fill_rect(c.dcx + gap, c.dcy - thick / 2, c.dcx + arm, c.dcy + thick / 2, fill, 70);
+
+	if (pad_touch & NES_UP) {
+		fill_rect(c.dcx - thick / 2, c.dcy - arm, c.dcx + thick / 2, c.dcy - gap,
+				  accent_565, 150);
+	}
+	if (pad_touch & NES_DOWN) {
+		fill_rect(c.dcx - thick / 2, c.dcy + gap, c.dcx + thick / 2, c.dcy + arm,
+				  accent_565, 150);
+	}
+	if (pad_touch & NES_LEFT) {
+		fill_rect(c.dcx - arm, c.dcy - thick / 2, c.dcx - gap, c.dcy + thick / 2,
+				  accent_565, 150);
+	}
+	if (pad_touch & NES_RIGHT) {
+		fill_rect(c.dcx + gap, c.dcy - thick / 2, c.dcx + arm, c.dcy + thick / 2,
+				  accent_565, 150);
 	}
 }
 
@@ -784,29 +824,8 @@ static void draw_overlay(void) {
 		return;
 	}
 
-	// D-pad: a translucent disc with four arrows, like the Doom port; the
-	// arrow of a held direction takes the accent colour.
-	fill_circle(c.dcx, c.dcy, c.dr, OVERLAY_RING, ALPHA_RING);
-	fill_circle(c.dcx, c.dcy, c.dr - 2 * scale, OVERLAY_DISC, ALPHA_DISC);
-	for (int direction = 0; direction < 4; direction++) {
-		bool pressed = false;
-		switch (direction) {
-		case 0:
-			pressed = (pad_touch & NES_LEFT) != 0;
-			break;
-		case 1:
-			pressed = (pad_touch & NES_RIGHT) != 0;
-			break;
-		case 2:
-			pressed = (pad_touch & NES_UP) != 0;
-			break;
-		default:
-			pressed = (pad_touch & NES_DOWN) != 0;
-			break;
-		}
-		fill_arrow(c.dcx, c.dcy, direction, c.dr, pressed ? accent_565 : OVERLAY_ARROW,
-				   pressed ? 225 : ALPHA_ARROW);
-	}
+	// D-pad: translucent blocks, see draw_dpad().
+	draw_dpad(c, scale);
 
 	uint32_t buttons = pad_phys | pad_touch;
 	draw_pad_button(c.acx, c.acy, c.ar, 'A', (buttons & NES_A) != 0, scale);
@@ -829,6 +848,49 @@ static int pad_slot(uint32_t bit) {
 		return 3;
 	default:
 		return 0;
+	}
+}
+
+static uint32_t action_bit(int action) {
+	switch (action) {
+	case ACT_A:
+		return NES_A;
+	case ACT_B:
+		return NES_B;
+	case ACT_SELECT:
+		return NES_SELECT;
+	case ACT_START:
+		return NES_START;
+	default:
+		return 0;
+	}
+}
+
+static uint32_t action_hold_ms(int action) {
+	switch (action) {
+	case ACT_A:
+		return 120;
+	case ACT_B:
+		return 160;
+	default:
+		return 140;
+	}
+}
+
+static int map_key_for_button(morpthis_button_t button) {
+	switch (button) {
+	case MORPTHIS_BUTTON_NEXT:
+		return MAP_NEXT;
+	case MORPTHIS_BUTTON_PREV:
+		return MAP_PREV;
+	case MORPTHIS_BUTTON_PLAY_PAUSE:
+		return MAP_PLAY_PAUSE;
+	case MORPTHIS_BUTTON_VOLUME_UP:
+		return MAP_VOLUME_UP;
+	case MORPTHIS_BUTTON_VOLUME_DOWN:
+		return MAP_VOLUME_DOWN;
+	default:
+		return -1;
 	}
 }
 
@@ -1035,15 +1097,19 @@ static void button_cb(morpthis_button_t button, morpthis_input_action_t action, 
 	bool pressed = action == MORPTHIS_INPUT_PRESS || action == MORPTHIS_INPUT_REPEAT;
 	bool released = action == MORPTHIS_INPUT_RELEASE;
 
-	switch (button) {
-	case MORPTHIS_BUTTON_NEXT:
+	int key = map_key_for_button(button);
+	if (key < 0) {
+		return;
+	}
+
+	int mapped = key_map[key];
+	if (mapped == ACT_PAUSE) {
 		if (pressed) {
-			phys_press(NES_SELECT, 140);
-		} else if (released) {
-			phys_release(NES_SELECT);
+			open_pause();
 		}
-		break;
-	case MORPTHIS_BUTTON_PREV:
+		return;
+	}
+	if (mapped == ACT_TURBO) {
 		if (pressed) {
 			turbo_held = true;
 			turbo_deadline = morpthis_app_time_ms() + 350;
@@ -1052,30 +1118,16 @@ static void button_cb(morpthis_button_t button, morpthis_input_action_t action, 
 			turbo_held = false;
 			nes_set_turbo(false);
 		}
-		break;
-	case MORPTHIS_BUTTON_PLAY_PAUSE:
+		return;
+	}
+
+	uint32_t bit = action_bit(mapped);
+	if (bit) {
 		if (pressed) {
-			phys_press(NES_START, 140);
+			phys_press(bit, action_hold_ms(mapped));
 		} else if (released) {
-			phys_release(NES_START);
+			phys_release(bit);
 		}
-		break;
-	case MORPTHIS_BUTTON_VOLUME_UP:
-		if (pressed) {
-			phys_press(NES_A, 120);
-		} else if (released) {
-			phys_release(NES_A);
-		}
-		break;
-	case MORPTHIS_BUTTON_VOLUME_DOWN:
-		if (pressed) {
-			phys_press(NES_B, 160);
-		} else if (released) {
-			phys_release(NES_B);
-		}
-		break;
-	default:
-		break;
 	}
 }
 
@@ -1189,14 +1241,26 @@ static bool build_pause(void) {
 }
 
 static morpthis_widget_t *add_control_row(const char *title, const char *value,
-										 morpthis_click_cb cb) {
+										 morpthis_click_cb cb, void *user) {
 	morpthis_widget_t *row = morpthis_settings_row_create(controls_screen, title, NULL, value,
-													  cb ? cb : no_op, NULL);
+													  cb ? cb : no_op, user);
 	if (!row) {
 		return NULL;
 	}
 	morpthis_widget_set_parent(row, controls_scroll);
 	return row;
+}
+
+static void on_mapping_click(morpthis_widget_t *widget, void *user) {
+	(void)widget;
+	int key = (int)(intptr_t)user;
+	if (key < 0 || key >= MAP_COUNT) {
+		return;
+	}
+	key_map[key] = (key_map[key] + 1) % ACT_COUNT;
+	morpthis_settings_row_set_value(mapping_rows[key], action_names[key_map[key]]);
+	morpthis_config_set_int("nes", map_config_keys[key], key_map[key]);
+	morpthis_config_save();
 }
 
 static bool build_controls(void) {
@@ -1220,25 +1284,31 @@ static bool build_controls(void) {
 	morpthis_container_set_scrollable(controls_scroll, true);
 
 	controls_touch = add_control_row("Touch overlay", touch_controls ? "On" : "Off",
-									 on_touch_controls);
+									 on_touch_controls, NULL);
 	if (!controls_touch) {
 		return false;
 	}
 
-	if (!add_control_row("Touch pad", "Move", NULL) ||
-		!add_control_row("VOLUME UP / DOWN", "A / B", NULL) ||
-		!add_control_row("PLAY/PAUSE", "Start", NULL) ||
-		!add_control_row("NEXT", "Select", NULL) ||
-		!add_control_row("PREV", "Turbo", NULL) ||
-		!add_control_row("POWER", "Pause", NULL)) {
+	if (!add_control_row("Touch pad", "Move", NULL, NULL)) {
+		return false;
+	}
+	for (int i = 0; i < MAP_COUNT; i++) {
+		int key = map_row_order[i];
+		mapping_rows[key] = add_control_row(map_key_names[key], action_names[key_map[key]],
+										  on_mapping_click, (void *)(intptr_t)key);
+		if (!mapping_rows[key]) {
+			return false;
+		}
+	}
+	if (!add_control_row("POWER", "Pause", NULL, NULL)) {
 		return false;
 	}
 
 	morpthis_widget_t *note = morpthis_label_create(controls_screen,
-												   "Hold the player sideways with its top edge on the right. "
-												   "The picture is 1:1. The volume rocker is A and B, so "
-												   "a finger can stay on the pad while the other hand runs "
-												   "and jumps.");
+												   "Tap a key row to cycle its action. Hold the player sideways "
+												   "with its top edge on the right; the picture is 1:1. The "
+												   "touch pad and its A/B buttons are fixed. On this page the "
+												   "volume rocker belongs to the player again.");
 	if (!note) {
 		return false;
 	}
@@ -1443,6 +1513,9 @@ static void dump_frame_bmp(const char *path) {
 
 static void on_nes_event(void *arg) {
 	(void)arg;
+#ifdef NES_HOST_TEST
+	static int dumped_frames;
+#endif
 	if (shutting_down) {
 		return;
 	}
@@ -1466,12 +1539,6 @@ static void on_nes_event(void *arg) {
 			morpthis_ui_refresh();
 			morpthis_logd("nes", "first frame: %dx%d at scale %d", geometry.game_w,
 						  geometry.game_h, geometry.scale);
-#ifdef NES_HOST_TEST
-			const char *dump = getenv("NES_DUMP_FRAME");
-			if (dump && dump[0]) {
-				dump_frame_bmp(dump);
-			}
-#endif
 		}
 		const char *error = nes_last_error();
 		if (error && error[0]) {
@@ -1486,6 +1553,15 @@ static void on_nes_event(void *arg) {
 			draw_overlay();
 			morpthis_canvas_invalidate(game_canvas, 0, 0, panel_w, panel_h);
 			morpthis_ui_refresh();
+#ifdef NES_HOST_TEST
+			// Let the ROM finish its own setup before the one dump.
+			if (++dumped_frames == 120) {
+				const char *dump = getenv("NES_DUMP_FRAME");
+				if (dump && dump[0]) {
+					dump_frame_bmp(dump);
+				}
+			}
+#endif
 		}
 		const char *error = nes_last_error();
 		if (error && error[0]) {
@@ -1623,6 +1699,13 @@ static void no_op(morpthis_widget_t *widget, void *user) {
 static void load_settings(void) {
 	sound_on = morpthis_config_get_bool("nes", "sound", true);
 	touch_controls = morpthis_config_get_bool("nes", "touch", true);
+	for (int i = 0; i < MAP_COUNT; i++) {
+		long value = morpthis_config_get_int("nes", map_config_keys[i], default_map[i]);
+		if (value < 0 || value >= ACT_COUNT) {
+			value = default_map[i];
+		}
+		key_map[i] = (int)value;
+	}
 }
 
 int morpthis_app_main(const morpthis_app_t *app) {
@@ -1647,6 +1730,12 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	morpthis_input_set_touch_cb(touch_cb, NULL);
 	nes_set_notify(post_nes_event);
 	nes_set_sound(sound_on);
+	morpthis_logi("nes", "settings: sound %s, touch overlay %s", sound_on ? "on" : "off",
+				  touch_controls ? "on" : "off");
+	morpthis_logi("nes", "keys: NEXT=%s PREV=%s PLAY=%s VOL+=%s VOL-=%s",
+				  action_names[key_map[MAP_NEXT]], action_names[key_map[MAP_PREV]],
+				  action_names[key_map[MAP_PLAY_PAUSE]], action_names[key_map[MAP_VOLUME_UP]],
+				  action_names[key_map[MAP_VOLUME_DOWN]]);
 	pulse_timer = morpthis_timer_create(10, pulse_tick, NULL);
 	if (!pulse_timer) {
 		morpthis_logw("nes", "the input timer is not available");

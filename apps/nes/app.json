@@ -6,6 +6,6 @@
   "icon": "icon.png",
   "description": "Play NES games from the card, with a landscape picture and touch controls",
   "category": "game",
-  "tier": "heavy",
+  "tier": "light",
   "min_player": 3
 }

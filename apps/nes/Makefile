@@ -26,14 +26,31 @@ MORPTHIS_SDK ?= $(abspath ../../../morpthis-sdk)
 include $(MORPTHIS_SDK)/app.mk
 
 # The emulator core. InfoNES_Mapper.cpp includes every mapper as one unit.
+#
+# InfoNES's pAPU divides by the timer value; the NES divides by timer + 1, so
+# every note is sharp, most of all the high ones. Patch the private copy in the
+# build tree rather than editing the shared checkout.
+PATCHED_PAPU := $(BUILD_DIR)/nesobj/InfoNES_pAPU_patched.cpp
+
+$(PATCHED_PAPU): $(INFONES_DIR)/src/InfoNES_pAPU.cpp
+	@mkdir -p $(dir $@)
+	sed -e 's|/ ApuC1Freq;|/ ( ApuC1Freq + 1 );|g' \
+		-e 's|/ ApuC2Freq;|/ ( ApuC2Freq + 1 );|g' \
+		-e 's|/ ApuC3Freq;|/ ( ApuC3Freq + 1 );|g' $< > $@
+	@grep -q 'ApuC1Freq + 1' $@ && grep -q 'ApuC2Freq + 1' $@ && grep -q 'ApuC3Freq + 1' $@ || \
+		{ echo "the InfoNES pAPU pitch patch did not apply"; rm -f $@; exit 1; }
+
 NES_CORE_SRCS := $(INFONES_DIR)/src/InfoNES.cpp \
 	$(INFONES_DIR)/src/K6502.cpp \
-	$(INFONES_DIR)/src/InfoNES_pAPU.cpp \
 	$(INFONES_DIR)/src/InfoNES_Mapper.cpp
 NES_OBJS := $(patsubst $(INFONES_DIR)/src/%.cpp,$(BUILD_DIR)/nesobj/%.o,$(NES_CORE_SRCS))
+NES_OBJS += $(BUILD_DIR)/nesobj/InfoNES_pAPU.o
 
 $(BUILD_DIR)/nesobj/%.o: $(INFONES_DIR)/src/%.cpp
 	@mkdir -p $(dir $@)
+	$(MORPTHIS_CXX) $(MORPTHIS_CXXFLAGS) -w -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/nesobj/InfoNES_pAPU.o: $(PATCHED_PAPU)
 	$(MORPTHIS_CXX) $(MORPTHIS_CXXFLAGS) -w -fno-exceptions -fno-rtti -MMD -MP -c $< -o $@
 
 # The core objects have to precede the libraries on the link line.

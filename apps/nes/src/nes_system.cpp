@@ -26,7 +26,7 @@
 
 #define AUDIO_RATE 44100
 #define AUDIO_CHANNELS 2
-#define AUDIO_BUFFER_MS 40
+#define AUDIO_BUFFER_MS 60
 #define FRAME_US 16639 // 60.0988 Hz, the NES frame rate
 #define SAVE_EVERY_FRAMES 3600 // a battery save about once a minute
 
@@ -34,6 +34,10 @@
 // palette
 // ---------------------------------------------------------------------------
 
+// InfoNES's palette is RGB555 (0RRRRRGGGGGBBBBB), not RGB565, and bit 15 is
+// not part of the colour: the core sets it on backdrop entries in PalTable to
+// mean "sprite priority shows through here". The frame copy in nes.c converts
+// each pixel to the panel's RGB565 and drops that flag.
 WORD NesPalette[64] = {
 	0x39ce, 0x1071, 0x0015, 0x2013, 0x440e, 0x5402, 0x5000, 0x3c20,
 	0x20a0, 0x0100, 0x0140, 0x00e2, 0x0ceb, 0x0000, 0x0000, 0x0000,
@@ -107,6 +111,8 @@ static bool audio_open(void) {
 	}
 	s_audio_open = true;
 	nes_backend_set_audio_pacing(true);
+	morpthis_logi("nes", "audio: opened %d Hz, %d ch, %d ms, player volume %d", s_audio_rate,
+				  AUDIO_CHANNELS, AUDIO_BUFFER_MS, morpthis_audio_volume());
 	if (!s_audio_playing) {
 		morpthis_audio_set_playing(true);
 		s_audio_playing = true;
@@ -157,6 +163,8 @@ void InfoNES_SoundOutput(int samples, BYTE *wave1, BYTE *wave2, BYTE *wave3,
 	static int32_t dc_in;
 	static int32_t dc_out;
 	static int16_t pcm[735 * AUDIO_CHANNELS];
+	static bool logged_block;
+	int peak = 0;
 	if (samples > 735) {
 		samples = 735;
 	}
@@ -171,15 +179,46 @@ void InfoNES_SoundOutput(int samples, BYTE *wave1, BYTE *wave2, BYTE *wave3,
 		} else if (value > 32767) {
 			value = 32767;
 		}
+		int magnitude = value < 0 ? -value : value;
+		if (magnitude > peak) {
+			peak = magnitude;
+		}
 		pcm[i * 2] = (int16_t)value;
 		pcm[i * 2 + 1] = (int16_t)value;
+	}
+	if (!logged_block) {
+		logged_block = true;
+		morpthis_logd("nes", "audio: first block peak %d", peak);
 	}
 
 	if (!s_audio_playing) {
 		morpthis_audio_set_playing(true);
 		s_audio_playing = true;
 	}
-	if (morpthis_audio_write(pcm, (size_t)samples) == 0) {
+
+	static uint64_t write_us_total;
+	static unsigned write_frames_total;
+	static int rate_reports;
+	uint64_t write_started = now_us();
+	size_t offset = 0;
+	while (offset < (size_t)samples) {
+		size_t written = morpthis_audio_write(pcm + offset * AUDIO_CHANNELS,
+											 (size_t)samples - offset);
+		if (written == 0) {
+			break;
+		}
+		offset += written;
+	}
+	write_us_total += now_us() - write_started;
+	write_frames_total += (unsigned)offset;
+	if (write_frames_total >= AUDIO_RATE && write_us_total > 0 && rate_reports < 3) {
+		unsigned rate = (unsigned)((uint64_t)write_frames_total * 1000000u / write_us_total);
+		morpthis_logi("nes", "audio: DAC consumes about %u Hz", rate);
+		rate_reports++;
+		write_us_total = 0;
+		write_frames_total = 0;
+	}
+	if (offset < (size_t)samples) {
 		morpthis_logw("nes", "the DAC stopped accepting samples");
 		audio_close();
 		s_audio_retry_at = now_us() + 3000000u;
@@ -426,6 +465,23 @@ static int SaveSRAM(void) {
 // ---------------------------------------------------------------------------
 
 void InfoNES_LoadFrame(void) {
+	static uint64_t fps_t0;
+	static int fps_n;
+	static int fps_reports;
+	uint64_t fps_now = now_us();
+	if (fps_t0 == 0) {
+		fps_t0 = fps_now;
+	}
+	if (++fps_n == 120 && fps_reports < 5) {
+		uint64_t elapsed = fps_now - fps_t0;
+		if (elapsed > 0) {
+			unsigned long fps10 = (unsigned long)(1200000000ull / elapsed);
+			morpthis_logi("nes", "fps %lu.%lu", fps10 / 10, fps10 % 10);
+		}
+		fps_reports++;
+		fps_n = 0;
+		fps_t0 = fps_now;
+	}
 	nes_backend_frame(WorkFrame, NES_DISP_WIDTH, NES_DISP_HEIGHT);
 
 	// With PCM open the blocking write at VBlank is the clock. Without it,

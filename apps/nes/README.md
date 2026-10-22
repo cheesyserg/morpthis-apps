@@ -16,13 +16,13 @@ a **Rescan** button).
   explains where the files go and offers **Rescan**.
 - **Game.** The NES picture at an integer scale (1:1 on the V1), rotated so it
   reads upright when the player is held with its top edge on the right. The
-  bottom corners carry a translucent D-pad disc and A/B buttons over the
-  picture, in the same style as the Doom port; the pause target is in the
-  top-right of the landscape picture. The overlay can be turned off from
-  **Controls**; the physical buttons still work.
+  bottom corners carry translucent D-pad blocks and A/B buttons over the
+  picture; the pause target is in the top-left of the landscape picture. The
+  overlay can be turned off from **Controls**; the physical buttons still work.
 - **Pause.** Resume, Reset, Sound, Controls and Exit game. Opening it pauses the
   emulator at a scanline and silences the PCM output.
-- **Controls.** The full mapping, plus a switch for the touch overlay.
+- **Controls.** The full mapping, plus a switch for the touch overlay. Tap a key
+  row to cycle its action; the choice is saved and survives a reboot.
 
 The library's own chevron is the way out: the player gives a `game` app no
 title row, no back affordance and no status bar. A downward swipe from the top
@@ -30,7 +30,9 @@ edge still peeks the status bar, as it does in every game.
 
 ## Controls
 
-| Input | Action |
+The five side keys are assignable. Their defaults are:
+
+| Input | Default |
 | --- | --- |
 | Touch D-pad (left) | Directions, including diagonals |
 | Touch A / B (right) | A / B |
@@ -43,16 +45,24 @@ edge still peeks the status bar, as it does in every game.
 | `BACK` | Pause; resume from the pause page |
 | Touch pause target | Pause |
 
-The panel reports one touch point, so a touch starting on the pad owns the pad
-until it lifts. The volume rocker is A and B, so the pad and the action buttons
-can be held at the same time; `NEXT` and `PREV` carry Select and Turbo. The
-transport keys are press-only on the V1, so the app turns a press into a short
-hold and extends it while the player repeats.
+On **Controls**, tapping a key row cycles it through None, A, B, Select, Start,
+Turbo and Pause. The touch pad and its A/B targets are fixed, and `POWER` and
+`BACK` always pause. The panel reports one touch point, so a touch starting on
+the pad owns the pad until it lifts; the volume keys are separate and can be
+held at the same time. The transport keys are press-only on the V1, so the app
+turns a press into a short hold and extends it while the player repeats. The
+rocker goes back to the player's volume while the pause page is up, so the level
+can be changed there.
 
 Audio is mixed by InfoNES at 44.1 kHz and written straight to the player's PCM
-output. The blocking write is the game clock; when sound is off or unavailable
-the app paces frames itself. Taking the output stops the player's music and it
-does not resume by itself when the app leaves.
+output with a 60 ms buffer. The blocking write is the game clock; when sound is
+off or unavailable the app paces frames itself. Taking the output stops the
+player's music and it does not resume by itself when the app leaves. The log
+says either `audio: opened ...` or `the DAC is busy; running without sound`;
+the latter means another output still owns the DAC, and the app retries every
+three seconds. `audio: DAC consumes about N Hz` reports what the output is
+really taking, and `fps` lines report the emulated frame rate for the first few
+seconds of a game.
 
 ## Battery saves
 
@@ -79,11 +89,14 @@ make MORPTHIS_MODE=device        # MIPS plugin
 make MORPTHIS_MODE=device check-abi
 ```
 
-Set `INFONES_DIR` if the checkout is elsewhere. The app compiles four core
-translation units (`InfoNES.cpp`, `K6502.cpp`, `InfoNES_pAPU.cpp`,
-`InfoNES_Mapper.cpp`) with the SDK's cross compiler and links the app's
-`src/nes_system.cpp` against them. The core is C++ but uses no STL, exceptions
-or RTTI.
+Set `INFONES_DIR` if the checkout is elsewhere. The app compiles three core
+translation units unchanged (`InfoNES.cpp`, `K6502.cpp`, `InfoNES_Mapper.cpp`)
+and a patched copy of `InfoNES_pAPU.cpp` with the SDK's cross compiler, then
+links the app's `src/nes_system.cpp` against them. The patch changes the timer
+divisor from `t` to `t + 1`, which is the NES's own formula; without it every
+note is sharp (by about 0.5% in the middle of the range and more at the top).
+The checkout itself is left untouched. The core is C++ but uses no STL,
+exceptions or RTTI.
 
 The fork has no release tags; CI pins it to commit
 `fe3295c0a86bf5bbecc22aeab3b3af11f6f47908` (2026-08-02), the revision this app is
