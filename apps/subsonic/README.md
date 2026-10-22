@@ -233,14 +233,16 @@ make package                     # device toolchain + mksquashfs
 
 `test` is the SDK host smoke test: it builds every screen (including the
 settings rows) and leaves through BACK at the root. `test-integration` starts a
-Subsonic-compatible server on `127.0.0.1`, serves a valid silent MP3 and a real
-24-bit FLAC stream over HTTP and, when `openssl` is available, over HTTPS with a
-self-signed certificate in relaxed mode. It exercises the real client, the JSON
-parser, dr_mp3, dr_flac and the PCM writes, checks the exact 327,680-frame
-lossless decode at 32-bit output, seeks to three seconds and checks both the
-clock baseline and the `timeOffset` request the server received, and stops a
-stream part-way to check that cancellation and teardown complete. It is not part
-of `make test` because it needs a listening loopback.
+Subsonic-compatible server on `127.0.0.1`, serves a valid silent MP3, an
+ID3v2-tagged MP3 dribbled in small socket writes (the case that used to fail in
+dr_mp3's tag skip), and a real 24-bit FLAC stream over HTTP and, when `openssl`
+is available, over HTTPS with a self-signed certificate in relaxed mode. It
+exercises the real client, the JSON parser, dr_mp3, dr_flac and the PCM writes,
+checks the exact 327,680-frame lossless decode at 32-bit output, seeks to three
+seconds and checks both the clock baseline and the `timeOffset` request the
+server received, and stops a stream part-way to check that cancellation and
+teardown complete. It is not part of `make test` because it needs a listening
+loopback.
 
 `make package` writes `dist/subsonic.pkgmerp`; copy it to
 `Apps/pkgmerps/subsonic.pkgmerp`. The writable folder, including

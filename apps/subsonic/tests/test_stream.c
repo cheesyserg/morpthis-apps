@@ -299,6 +299,46 @@ int main(int argc, char **argv) {
 	check(after_seek < 15000, "the clock stays inside the track");
 	stream_player_stop();
 
+	// A real MP3 starts with an ID3v2 tag, and dr_mp3 skips it using reads it
+	// expects the callback to fill. The test server dribbles this stream in
+	// small writes, so each socket read is short -- exactly what a tagged file
+	// over a real network does.
+	stream_track_t tagged;
+	memset(&tagged, 0, sizeof(tagged));
+	snprintf(tagged.id, sizeof(tagged.id), "id3");
+	snprintf(tagged.title, sizeof(tagged.title), "Tagged Track");
+	snprintf(tagged.suffix, sizeof(tagged.suffix), "mp3");
+	tagged.format = SUBSONIC_FORMAT_RAW;
+	tagged.duration_ms = 3000;
+
+	pthread_mutex_lock(&event_lock);
+	finished = false;
+	failed = false;
+	pthread_mutex_unlock(&event_lock);
+	check(stream_player_start(&tagged), "tagged MP3 start");
+
+	pthread_mutex_lock(&event_lock);
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 20;
+	while (!finished && !failed) {
+		if (pthread_cond_timedwait(&event_cond, &event_lock, &deadline) != 0) {
+			break;
+		}
+	}
+	bool tagged_done = finished;
+	bool tagged_failed = failed;
+	pthread_mutex_unlock(&event_lock);
+	check(tagged_done, tagged_failed ? failure : "the tagged MP3 played to the end");
+
+	pthread_mutex_lock(&audio_lock);
+	size_t tagged_frames = audio_frames;
+	pthread_mutex_unlock(&audio_lock);
+	// dr_mp3 spends one frame on sync detection and may drop a final partial
+	// one at EOF. What matters is that the ID3v2 tag did not stop the stream at
+	// init: the rest of the file decoded through to the end.
+	check(tagged_frames >= 98 * 1152, "the tagged MP3 decoded through to its end");
+	stream_player_stop();
+
 	// Stop a second stream in the middle. The worker must wake from its read and
 	// leave no completion event for the abandoned generation.
 	pthread_mutex_lock(&event_lock);

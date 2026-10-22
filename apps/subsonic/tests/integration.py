@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # MPEG-1 Layer III, 128 kbps, 44.1 kHz, stereo. 417 bytes is the frame size
 # for those parameters; the payload is zero, which decodes as silence. This is
@@ -28,6 +29,27 @@ import threading
 FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
 STREAM_FRAMES = 600
 STREAM = FRAME * STREAM_FRAMES
+
+
+def make_tagged_mp3() -> bytes:
+    """A real-looking MP3: an ID3v2 tag with 4 KB of padding, then frames.
+
+    Every MP3 ripped or downloaded in the wild starts with an ID3v2 tag, often
+    with embedded artwork. dr_mp3 skips it with fixed-size reads that it
+    expects to be filled completely; a streamed socket rarely does that.
+    """
+    payload = bytes(4096)
+    size = len(payload)
+    synchsafe = bytes([
+        (size >> 21) & 0x7F,
+        (size >> 14) & 0x7F,
+        (size >> 7) & 0x7F,
+        size & 0x7F,
+    ])
+    return b"ID3\x04\x00\x00" + synchsafe + payload + FRAME * 100
+
+
+TAGGED_STREAM = make_tagged_mp3()
 
 # Every /rest/stream.view path the test binary asked for. The seek test checks
 # that the server was really told to start three seconds in.
@@ -165,12 +187,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 - the base signature
         pass
 
-    def send_body(self, body: bytes, content_type: str) -> None:
+    def send_body(self, body: bytes, content_type: str, dribble: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not dribble:
+            self.wfile.write(body)
+            return
+        # Small writes, each flushed: forces the client's recv()/SSL_read() to
+        # return short reads the way a real network does. This is the case that
+        # broke dr_mp3's ID3v2 skip.
+        step = 700
+        for start in range(0, len(body), step):
+            self.wfile.write(body[start:start + step])
+            self.wfile.flush()
+            time.sleep(0.001)
 
     def do_GET(self):  # noqa: N802 - the base name
         if self.path.startswith("/rest/stream.view"):
@@ -189,6 +221,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/rest/stream.view"):
             if "format=flac" in self.path:
                 self.send_body(FLAC_STREAM, "audio/flac")
+            elif "id=id3" in self.path:
+                self.send_body(TAGGED_STREAM, "audio/mpeg", dribble=True)
             else:
                 self.send_body(STREAM, "audio/mpeg")
         else:

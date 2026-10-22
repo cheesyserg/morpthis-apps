@@ -130,18 +130,63 @@ typedef struct {
 
 static size_t read_body(void *user, void *buffer, size_t bytes) {
 	source_t *source = user;
-	if (aborted(source->generation)) {
+	if (!source || (!buffer && bytes)) {
 		return 0;
 	}
-	int got = http_stream_read(source->http, buffer, (int)bytes);
-	if (got < 0) {
-		source->io_error = true;
-		return 0;
+	unsigned char *out = buffer;
+	size_t total = 0;
+	while (total < bytes) {
+		if (aborted(source->generation)) {
+			break;
+		}
+		int got = http_stream_read(source->http, out + total, (int)(bytes - total));
+		if (got < 0) {
+			source->io_error = true;
+			break;
+		}
+		if (got == 0) {
+			break; // the end of the stream
+		}
+		total += (size_t)got;
+		// dr_mp3 asks for its 64 KiB audio chunk here and accumulates partial
+		// data itself. Filling the whole chunk before the first frame would stall
+		// the start of a slow stream for seconds. Everything smaller is metadata
+		// (the ID3v2 header and tag skip, the FLAC seek skip), and the decoders
+		// treat a short read there as a broken file or the end of the stream.
+		if (bytes > 4096) {
+			break;
+		}
 	}
-	return (size_t)got;
+	return total;
 }
 
-static size_t flac_read(void *user, void *buffer, size_t bytes) { return read_body(user, buffer, bytes); }
+// dr_flac reads through a fixed 4 KiB bitstream cache and treats anything less
+// than a full cache as the end of the stream. Its callback must always fill the
+// buffer, or a real network (where recv() returns whatever has arrived) would
+// truncate the track.
+static size_t flac_read(void *user, void *buffer, size_t bytes) {
+	source_t *source = user;
+	if (!source || (!buffer && bytes)) {
+		return 0;
+	}
+	unsigned char *out = buffer;
+	size_t total = 0;
+	while (total < bytes) {
+		if (aborted(source->generation)) {
+			break;
+		}
+		int got = http_stream_read(source->http, out + total, (int)(bytes - total));
+		if (got < 0) {
+			source->io_error = true;
+			break;
+		}
+		if (got == 0) {
+			break;
+		}
+		total += (size_t)got;
+	}
+	return total;
+}
 
 // dr_flac insists on a seek callback even when the stream is only read forward.
 // Everything it does at open time is either a forward skip (metadata, ID3) or an
@@ -276,10 +321,12 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 			drmp3_uninit(mp3);
 			free(mp3);
 			if (!aborted(generation)) {
+				morpthis_logw("subsonic", "the MP3 decoder rejected the stream (%s)",
+							  source.io_error ? "read error" : "no MPEG audio found");
 				post_event(generation, STREAM_EVENT_FAILED,
 						   source.io_error ? "The stream ended before any audio arrived."
 										  : (track->format == SUBSONIC_FORMAT_RAW
-												 ? "Original quality: the server did not send an MP3 file this app can read. Choose MP3 or FLAC transcoding."
+												 ? "Original quality: this MP3 could not be decoded. The file may be damaged."
 												 : "The server did not send an MP3 stream. Enable MP3 transcoding on it."),
 						   track);
 			}
