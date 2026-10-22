@@ -10,10 +10,11 @@ SDK, validates the manifests and packages the result as a `.pkgmerp`.
 
 **Status.** Foundation. `calculator` is an in-process UI app with the SDK;
 `flappybird` is a game with its own clock and PCM mixer; `doom` runs the
-Doom engine from a sibling `doomgeneric` checkout; `checksum` is a headless
-tool that the player runs through its `fork`/`execve` path; `subsonic` is a
-network streaming app with its own HTTP/TLS stack and an MP3 decoder. They all
-run through the player's app paths; see the SDK's
+Doom engine from a sibling `doomgeneric` checkout; `nes` runs InfoNES from a
+sibling checkout, with a scanned ROM library and a landscape game canvas;
+`checksum` is a headless tool that the player runs through its `fork`/`execve`
+path; `subsonic` is a network streaming app with its own HTTP/TLS stack and an
+MP3 decoder. They all run through the player's app paths; see the SDK's
 `docs/player-integration.md`.
 
 ## Quick start
@@ -42,6 +43,15 @@ morpthis/
   doomgeneric/
 ```
 
+`nes` needs the InfoNES checkout next to it:
+
+```text
+morpthis/
+  morpthis-apps/
+  morpthis-sdk/
+  InfoNES/
+```
+
 Set `MORPTHIS_SDK` if it lives elsewhere:
 
 ```sh
@@ -50,6 +60,8 @@ make MORPTHIS_SDK=/path/to/morpthis-sdk test
 
 Set `DOOMGENERIC_DIR` if the patched doomgeneric checkout lives elsewhere; see
 [apps/doom/README.md](apps/doom/README.md) for the patch and the game data.
+Set `INFONES_DIR` if the InfoNES checkout lives elsewhere; see
+[apps/nes/README.md](apps/nes/README.md) for the ROM folder and controls.
 
 `subsonic` also has a loopback integration test that needs no server:
 
@@ -65,6 +77,7 @@ apps/
   checksum/        app.json, src/main.c, Makefile
   doom/            app.json, icon.png, src/, Makefile
   flappybird/      app.json, icon.png, src/main.c, assets/, Makefile
+  nes/             app.json, icon.png, src/, tools/, Makefile
   subsonic/        app.json, icon.png, src/, tests/, Makefile
 tools/
   validate-manifest.py

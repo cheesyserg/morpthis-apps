@@ -1,0 +1,11 @@
+{
+  "id": "nes",
+  "name": "NES",
+  "version": "0.1.0",
+  "entry": "nes",
+  "icon": "icon.png",
+  "description": "Play NES games from the card, with a landscape picture and touch controls",
+  "category": "game",
+  "tier": "heavy",
+  "min_player": 3
+}

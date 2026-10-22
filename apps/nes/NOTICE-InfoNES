@@ -1,0 +1,10 @@
+InfoNES
+
+Copyright (c) 1999-2005 Jay's Factory and the InfoNES contributors.
+https://github.com/jay-kumogata/InfoNES
+
+This app embeds InfoNES as its emulator core. InfoNES is licensed under the
+Apache License, Version 2.0; the full text is in LICENSE-InfoNES beside this
+file. The Morpthis app around it is distributed under the repository's GPLv3.
+
+ROMs and game data are not part of this package.
