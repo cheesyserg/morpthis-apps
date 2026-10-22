@@ -160,8 +160,8 @@ machine.
 
 The name carries no version. Copy `dist/<id>.pkgmerp` to
 `Apps/pkgmerps/<id>.pkgmerp` on the card; the app's writable files already live
-in `merp_data/<id>/`, outside the image, so replacing the package keeps them.
-There is no install step in the player yet.
+in `Apps/merp_data/<id>/`, outside the image, so replacing the package keeps
+them. There is no install step in the player yet.
 
 ## Releases
 

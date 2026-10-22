@@ -32,7 +32,7 @@ API 1 has no text-entry widget, so the account lives in a file. On the first
 launch the app writes a template to:
 
 ```text
-<card>/merp_data/subsonic/settings.json
+<card>/Apps/merp_data/subsonic/settings.json
 ```
 
 The app's data folder survives replacing the package. Edit the file from a PC
@@ -57,7 +57,7 @@ changed it over ADB while the app was running.
 | `server` | Base URL, with any reverse-proxy prefix. `http://` or `https://`; a pasted `/rest` suffix is removed. |
 | `username`, `password` | The Subsonic account. The password is stored in plain text on the card; use a dedicated account. |
 | `format` | `mp3` (default), `flac` (server transcodes to lossless FLAC) or `raw` (the original file; only FLAC and MP3 originals are decoded). Use `raw` when the server's FLAC transcoder is set to 16 bits and the library has 24-bit files. |
-| `max_bitrate` | 64–320 kbps, used only when `format` is `mp3`. The **Quality** button cycles 256 → 320 → FLAC → original (no transcoding). |
+| `max_bitrate` | 64–320 kbps, used only when `format` is `mp3`. The **Streaming quality** row opens a menu with MP3 256, MP3 320, FLAC and Original (no transcoding). |
 | `tls_verify` | `strict` (default) or `relaxed`. Relaxed accepts a self-signed certificate or an unknown issuer, but still checks the name and the dates. |
 | `ca_bundle` | Optional absolute path to a PEM bundle. `<card>/.local/cacert.pem` and `/etc/ssl/cert.pem` are checked when this is empty. |
 
@@ -66,7 +66,7 @@ The quickest route to a working server:
 - Turn on transcoding in Gonic/Navidrome/Subsonic; MP3 at 256 kbps is the
   default the app asks for, and FLAC gives lossless playback.
 - If the server has a self-signed certificate, set `"tls_verify": "relaxed"`
-  or tap **TLS** on the settings screen. Prefer a private CA and `ca_bundle`
+  or choose **Relaxed** on the **TLS verification** row. Prefer a private CA and `ca_bundle`
   where possible.
 
 ## Using it
@@ -83,15 +83,23 @@ now-playing page, laid out like the player's own V1 page: a large centred
 sleeve over a deck with the title and artist left-aligned, the bit depth,
 sample rate and codec at the right, a thin progress bar with elapsed and total
 under its ends and the queue position between them, and the transport centred
-with the queue on the left and More on the right. The play glyph in the
-heading row opens the same page. The cover is downloaded once per track into
-`merp_data/subsonic/covers/current.jpg`; the page and the mini-player read it
-from there.
+with the queue on the left and More on the right. The progress bar is seekable:
+the clock follows the finger while it moves, and letting go restarts the stream
+at that offset (Subsonic's `timeOffset`, whole seconds). A server that does not
+implement `timeOffset` ignores it and sends the track from the beginning. The
+play glyph in the heading row opens the same page. The cover is downloaded once per track into
+`Apps/merp_data/subsonic/covers/current.jpg`; the page and the mini-player read
+it from there.
 
 The track is also published to the player, so the status bar's play glyph and
 the control centre's now-playing card follow the app instead of the player's
 stopped queue. The card's transport buttons come back to the app, and tapping
 the card opens this app's now-playing page.
+
+While it is producing sound, the app's output counts as playback for the power
+manager: the display still turns off on the idle timer, but the device does not
+enter standby and the Wi-Fi radio is not parked, exactly as for a local track.
+Pausing hands the standby timer back.
 
 | Control | Action |
 | --- | --- |
@@ -115,8 +123,8 @@ value in force:
 
 | Row | What it does |
 | --- | --- |
-| **TLS verification** | Strict or relaxed. Tapping toggles it and saves. |
-| **Streaming quality** | MP3 256, MP3 320, FLAC (server transcodes) or Original (no transcoding). Tapping cycles it. |
+| **TLS verification** | Opens a menu: Strict (verify the certificate) or Relaxed (accept self-signed), with the current choice ticked. |
+| **Streaming quality** | Opens a menu: MP3 256, MP3 320, FLAC (server transcodes) or Original (no transcoding), with the current choice ticked. |
 | **Reload settings** | Re-reads `settings.json` from the card. |
 | **Server**, **Account** | Read-only, so the current account is never a guess. |
 | **Settings file** | Where the file lives. Tapping any read-only row says how to edit it. |
@@ -148,8 +156,10 @@ Subsonic replacement:
   artist/detail, chevron) without thumbnails, because downloading a cover for
   every row of a 200-entry list would cost more RAM and time than it is worth
   on this device.
-- No seeking or gapless playback. Playlists can be browsed and played, but not
-  created or edited from the device.
+- No gapless playback. Seeking restarts the HTTP stream at the chosen second,
+  so there is a short reconnect; servers that implement Subsonic's `timeOffset`
+  start where asked, and one that ignores it starts the track again. Playlists
+  can be browsed and played, but not created or edited from the device.
 - One stream at a time. Starting another track stops the first.
 - No look-ahead buffer: the decoder reads from the socket directly. A link
   that stalls can leave an audible gap. The player's built-in client used two
@@ -171,7 +181,7 @@ Subsonic replacement:
 
 | File | Role |
 | --- | --- |
-| `src/main.c` | Screens, browsing state, queue, star, search and settings toggles. |
+| `src/main.c` | Screens, browsing state, queue, star, search and the settings choices. |
 | `src/subsonic_client.c` | REST client: token auth, browse endpoints, stream URL, star, scrobble. |
 | `src/browse_worker.c` | One worker thread for browse requests. |
 | `src/cover_worker.c` | One worker thread for the current track's cover art. |
@@ -226,7 +236,7 @@ complete. It is not part of `make test` because it needs a listening loopback.
 
 `make package` writes `dist/subsonic.pkgmerp`; copy it to
 `Apps/pkgmerps/subsonic.pkgmerp`. The writable folder, including
-`settings.json`, is `merp_data/subsonic/` and is not part of the image.
+`settings.json`, is `Apps/merp_data/subsonic/` and is not part of the image.
 
 ## Licence
 

@@ -242,6 +242,11 @@ static bool request_url(const char *endpoint, const char *key, const char *value
 
 bool subsonic_stream_url(const char *id, subsonic_quality_t q, char *out, size_t size,
 						 char *error, size_t error_size) {
+	return subsonic_stream_url_at(id, q, 0, out, size, error, error_size);
+}
+
+bool subsonic_stream_url_at(const char *id, subsonic_quality_t q, int offset_seconds,
+							char *out, size_t size, char *error, size_t error_size) {
 	reason(error, error_size, "");
 	if (!out || !size || !id || !id[0] || q.format < SUBSONIC_FORMAT_MP3 ||
 		q.format > SUBSONIC_FORMAT_FLAC ||
@@ -259,6 +264,14 @@ bool subsonic_stream_url(const char *id, subsonic_quality_t q, char *out, size_t
 	if (n < 0 || (size_t)n >= size - used) {
 		reason(error, error_size, "The request URL is too long.");
 		return false;
+	}
+	if (offset_seconds > 0) {
+		used = strlen(out);
+		n = snprintf(out + used, size - used, "&timeOffset=%d", offset_seconds);
+		if (n < 0 || (size_t)n >= size - used) {
+			reason(error, error_size, "The request URL is too long.");
+			return false;
+		}
 	}
 	return true;
 }

@@ -161,6 +161,8 @@ int main(int argc, char **argv) {
 	check(strstr(url, "/rest/stream.view?") != NULL, "stream endpoint");
 	check(strstr(url, "&format=mp3") != NULL, "MP3 format is requested");
 	check(strstr(url, "&maxBitRate=128") != NULL, "bitrate is requested");
+	check(subsonic_stream_url_at("tr1", quality, 125, url, sizeof(url), error, sizeof(error)), error);
+	check(strstr(url, "&timeOffset=125") != NULL, "a seek offset is requested");
 
 	subsonic_entry_t entries[SUBSONIC_PAGE_SIZE];
 	bool more = true;

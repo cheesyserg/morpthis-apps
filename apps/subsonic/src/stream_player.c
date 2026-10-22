@@ -31,12 +31,15 @@ typedef struct {
 	bool started;
 	bool quit;
 
-	// A new request stops the old stream and starts this one.
+	// A new request stops the old stream and starts this one. `current` is the
+	// last one, kept for seeking: the now page asks to restart it further in.
 	bool has_request;
 	bool abort;
 	bool paused;
 	unsigned generation;
 	stream_track_t request;
+	stream_track_t current;
+	bool has_current;
 
 	// The stream being opened or read, published so stop/shutdown can shut its
 	// socket down. `setup_fd` covers the window before http_stream_open_ex()
@@ -165,7 +168,8 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	char url[SUBSONIC_URL_MAX];
 	char error[192] = "";
 	subsonic_quality_t quality = subsonic_quality();
-	if (!subsonic_stream_url(track->id, quality, url, sizeof(url), error, sizeof(error))) {
+	if (!subsonic_stream_url_at(track->id, quality, track->start_ms / 1000, url, sizeof(url),
+							   error, sizeof(error))) {
 		post_event(generation, STREAM_EVENT_FAILED, error, track);
 		return;
 	}
@@ -320,8 +324,10 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	// a scrobble must never hold up the thread that feeds the DAC.
 	morpthis_logi("subsonic", "%s %d-bit at %d Hz, output %d-bit", flac_stream ? "FLAC" : "MP3",
 				  source_bits, rate, out_bits);
+	// The offset the server was asked for is where the clock starts; without it
+	// the page would jump back to zero on every seek.
 	pthread_mutex_lock(&player.lock);
-	player.position_ms = 0;
+	player.position_ms = track->start_ms;
 	player.duration_ms = track->duration_ms;
 	player.source_rate = rate;
 	player.source_bits = source_bits;
@@ -376,7 +382,7 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 		}
 		frames_played += got;
 		if (frames_played >= next_progress) {
-			int position = (int)(frames_played * 1000u / (uint64_t)rate);
+			int position = track->start_ms + (int)(frames_played * 1000u / (uint64_t)rate);
 			pthread_mutex_lock(&player.lock);
 			player.position_ms = position;
 			pthread_mutex_unlock(&player.lock);
@@ -474,11 +480,13 @@ bool stream_player_start(const stream_track_t *track) {
 	pthread_mutex_lock(&player.lock);
 	player.request = *track;
 	player.has_request = true;
+	player.current = *track;
+	player.has_current = true;
 	player.abort = true; // stop whatever is running
 	player.paused = false;
 	// The page switches to the new title before the handshake finishes; a
 	// position left over from the previous track would be shown against it.
-	player.position_ms = 0;
+	player.position_ms = track->start_ms;
 	player.duration_ms = track->duration_ms;
 	player.generation++;
 	if (player.http) {
@@ -513,6 +521,34 @@ void stream_player_stop(void) {
 	// The worker closes the output when it notices the abort; the status bar
 	// should not claim sound during that window.
 	morpthis_audio_set_playing(false);
+}
+
+bool stream_player_seek(int position_ms) {
+	if (!player.started || position_ms < 0) {
+		return false;
+	}
+
+	pthread_mutex_lock(&player.lock);
+	bool have = player.has_current;
+	bool paused = player.paused;
+	stream_track_t track = player.current;
+	pthread_mutex_unlock(&player.lock);
+	if (!have) {
+		return false;
+	}
+
+	// timeOffset is whole seconds, so the clock baseline is rounded to match
+	// what the server will actually send.
+	track.start_ms = (position_ms / 1000) * 1000;
+	if (!stream_player_start(&track)) {
+		return false;
+	}
+	if (paused) {
+		// A seek while paused prepares the new stream and leaves it paused; the
+		// worker reads this before it opens the output.
+		stream_player_pause(true);
+	}
+	return true;
 }
 
 void stream_player_pause(bool paused) {

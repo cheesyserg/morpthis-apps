@@ -170,11 +170,11 @@ before a release. The package is `dist/<id>.pkgmerp`: an uncompressed squashfs
 image with `app.json`, the icon and the entry binary at its root. Copy it to
 `Apps/pkgmerps/<id>.pkgmerp` on the card.
 
-Anything the app writes at runtime belongs in `merp_data/<id>/`, which the SDK
-presents as the same tree: a read falls back from the data folder to the
+Anything the app writes at runtime belongs in `Apps/merp_data/<id>/`, which the
+SDK presents as the same tree: a read falls back from the data folder to the
 package, and a write always lands in the data folder. That way an update can
 replace the package without touching a save or a setting. Doom's WADs are the
-first example: they are copied to `merp_data/doom/`, not into the image.
+first example: they are copied to `Apps/merp_data/doom/`, not into the image.
 
 ## 8. Release
 

@@ -6,9 +6,9 @@
 // dr_flac.
 //
 // API 1 has no text-entry widget, so the server, username and password come
-// from merp_data/subsonic/settings.json. The settings screen shows the path and
-// toggles the two things that are pleasant to change without a PC: strict or
-// relaxed TLS, and the MP3 bitrate.
+// from Apps/merp_data/subsonic/settings.json. The settings screen shows the path and
+// opens the changeable values as menus: strict or relaxed TLS, and the stream
+// quality.
 
 #include <morpthis/morpthis.h>
 
@@ -88,6 +88,9 @@ static morpthis_widget_t *g_now_total;
 static morpthis_widget_t *g_now_queue_pos;
 static morpthis_widget_t *g_now_play;
 static morpthis_icon_t g_now_play_kind; // the glyph already on g_now_play
+static bool g_seeking;               // a finger is on the progress bar
+static bool g_updating_slider;       // a programmatic set, not a drag
+static bool g_now_seekable = true;   // the bar's current enabled state
 static char g_now_artist_text[128];
 static char g_now_format_text[32];
 static int g_now_duration_secs;
@@ -329,14 +332,23 @@ static void update_now_screen(void) {
 	}
 	if (g_now_progress) {
 		morpthis_widget_set_visible(g_now_progress, duration > 0);
-		if (duration > 0) {
+		// Seeking is only meaningful while a track is loaded: a seek restarts
+		// the stream, so a stopped page must not offer it.
+		bool seekable = duration > 0 && (g_playing || g_paused);
+		if (g_now_seekable != seekable) {
+			morpthis_widget_set_enabled(g_now_progress, seekable);
+			g_now_seekable = seekable;
+		}
+		if (duration > 0 && !g_seeking) {
 			int value = (int)((long long)position * 1000 / duration);
+			g_updating_slider = true;
 			morpthis_slider_set_value(g_now_progress, value);
+			g_updating_slider = false;
 		}
 	}
 	char elapsed[16];
 	format_time(position, elapsed, sizeof(elapsed));
-	if (g_now_elapsed) {
+	if (g_now_elapsed && !g_seeking) {
 		set_text_if_changed(g_now_elapsed, elapsed);
 	}
 	if (g_now_total) {
@@ -373,6 +385,67 @@ static void show_now_playing(morpthis_widget_t *widget, void *user) {
 	}
 	update_now_screen();
 	morpthis_screen_load(g_now_screen);
+}
+
+// The progress bar maps 0..1000 to the track's length. -1 when the length is
+// not known, which is also when the bar is disabled.
+static int slider_seconds(int value) {
+	int duration = g_now_duration_secs > 0 ? g_now_duration_secs : stream_player_duration_ms() / 1000;
+	if (duration <= 0) {
+		return -1;
+	}
+	int seconds = (int)((long long)value * duration / 1000);
+	if (seconds < 0) {
+		seconds = 0;
+	}
+	if (seconds > duration) {
+		seconds = duration;
+	}
+	return seconds;
+}
+
+// While the finger moves, only the clock follows: restarting the HTTP stream on
+// every slider event would never let a connection finish.
+static void now_seek_cb(morpthis_widget_t *slider, int value, void *user) {
+	(void)slider;
+	(void)user;
+	if (g_updating_slider) {
+		return;
+	}
+	int seconds = slider_seconds(value);
+	if (seconds < 0) {
+		return;
+	}
+	g_seeking = true;
+	char elapsed[16];
+	format_time(seconds, elapsed, sizeof(elapsed));
+	set_text_if_changed(g_now_elapsed, elapsed);
+}
+
+// The finger lifted: one restart at the chosen offset, then the normal progress
+// events take over again.
+static void now_seek_release_cb(morpthis_widget_t *slider, int value, void *user) {
+	(void)slider;
+	(void)user;
+	if (g_updating_slider) {
+		return;
+	}
+	g_seeking = false;
+	int seconds = slider_seconds(value);
+	if (seconds < 0) {
+		return;
+	}
+	int duration = g_now_duration_secs > 0 ? g_now_duration_secs : stream_player_duration_ms() / 1000;
+	if (duration > 2 && seconds >= duration) {
+		seconds = duration - 2; // leave a little to play
+	}
+	if (seconds == stream_player_position_ms() / 1000) {
+		return; // a tap on the current position, or a duplicate release
+	}
+	if (!stream_player_seek(seconds * 1000)) {
+		morpthis_toast("Could not seek this stream.");
+	}
+	update_now_screen();
 }
 
 static const subsonic_entry_t *current_entry(void) {
@@ -675,6 +748,7 @@ static bool play_queue_at(int index) {
 	g_playing = true;
 	g_paused = false;
 	g_have_error = false;
+	g_seeking = false;
 	g_queue_index = index;
 	snprintf(g_now_playing, sizeof(g_now_playing), "%s", entry->title);
 	// The now-playing page and the mini-player show the artist; an album with no
@@ -836,6 +910,7 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 	if (kind == STREAM_EVENT_FINISHED) {
 		g_playing = false;
 		g_paused = false;
+		g_seeking = false;
 		if (g_queue_index >= 0 && play_queue_at(g_queue_index + 1)) {
 			return;
 		}
@@ -850,6 +925,7 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 	}
 	g_playing = false;
 	g_paused = false;
+	g_seeking = false;
 	publish_track(false);
 	update_playing_mark();
 	update_now_bar();
@@ -867,6 +943,7 @@ static void stop_playback(morpthis_widget_t *widget, void *user) {
 	stream_player_stop();
 	g_playing = false;
 	g_paused = false;
+	g_seeking = false;
 	g_have_error = false;
 	morpthis_audio_set_track(NULL, false);
 	update_playing_mark();
@@ -1110,6 +1187,7 @@ static void queue_clear(morpthis_widget_t *widget, void *user) {
 	g_queue_index = -1;
 	g_playing = false;
 	g_paused = false;
+	g_seeking = false;
 	morpthis_audio_set_track(NULL, false);
 	update_queue_screen();
 	update_playing_mark();
@@ -1250,17 +1328,17 @@ static void update_settings_screen(void) {
 	morpthis_list_clear(g_settings_list);
 
 	morpthis_list_add_entry(g_settings_list, "TLS verification",
-							g_settings.tls_relaxed ? "Relaxed, self-signed (tap)"
-												  : "Strict, verified (tap)",
+							g_settings.tls_relaxed ? "Relaxed, self-signed accepted"
+												  : "Strict, certificate verified",
 							NULL, false);
 
 	char quality[64];
 	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
-		snprintf(quality, sizeof(quality), "FLAC lossless (tap)");
+		snprintf(quality, sizeof(quality), "FLAC lossless");
 	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
-		snprintf(quality, sizeof(quality), "Original, no transcode (tap)");
+		snprintf(quality, sizeof(quality), "Original, no transcoding");
 	} else {
-		snprintf(quality, sizeof(quality), "MP3 %d kbps (tap)", g_settings.quality.max_bitrate);
+		snprintf(quality, sizeof(quality), "MP3 %d kbps", g_settings.quality.max_bitrate);
 	}
 	morpthis_list_add_entry(g_settings_list, "Streaming quality", quality, NULL, false);
 
@@ -1282,8 +1360,8 @@ static void update_settings_screen(void) {
 	morpthis_list_add_entry(g_settings_list, "Account", account, NULL, false);
 
 	// The file itself, and the reminder that it is edited outside the app.
-	morpthis_list_add_entry(g_settings_list, "Settings file", "merp_data/subsonic/settings.json",
-							NULL, false);
+	morpthis_list_add_entry(g_settings_list, "Settings file",
+							"Apps/merp_data/subsonic/settings.json", NULL, false);
 }
 
 // Rebuilding the list destroys the row whose select callback is running, so a
@@ -1293,14 +1371,15 @@ static void settings_refresh_cb(void *user) {
 	update_settings_screen();
 }
 
-static void toggle_tls(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
+static void set_tls(bool relaxed) {
 	if (!g_settings_valid) {
 		morpthis_toast("Fix settings.json first.");
 		return;
 	}
-	g_settings.tls_relaxed = !g_settings.tls_relaxed;
+	if (g_settings.tls_relaxed == relaxed) {
+		return;
+	}
+	g_settings.tls_relaxed = relaxed;
 	if (!settings_save(&g_settings)) {
 		morpthis_toast("Could not save settings.json.");
 	}
@@ -1309,39 +1388,60 @@ static void toggle_tls(morpthis_widget_t *widget, void *user) {
 		morpthis_toast(error);
 	}
 	morpthis_app_post(settings_refresh_cb, NULL);
-	morpthis_toast(g_settings.tls_relaxed ? "Self-signed certificates are accepted." : "Strict TLS checking.");
+	morpthis_toast(relaxed ? "Self-signed certificates are accepted." : "Strict TLS checking.");
 }
 
-static void toggle_quality(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
+static void set_quality(subsonic_format_t format, int bitrate) {
 	if (!g_settings_valid) {
 		morpthis_toast("Fix settings.json first.");
 		return;
 	}
-	if (g_settings.quality.format == SUBSONIC_FORMAT_MP3 && g_settings.quality.max_bitrate < 320) {
-		g_settings.quality.max_bitrate = 320;
-	} else if (g_settings.quality.format == SUBSONIC_FORMAT_MP3) {
-		g_settings.quality.format = SUBSONIC_FORMAT_FLAC;
-	} else if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
-		g_settings.quality.format = SUBSONIC_FORMAT_RAW;
-	} else {
-		g_settings.quality.format = SUBSONIC_FORMAT_MP3;
-		g_settings.quality.max_bitrate = 256;
+	if (g_settings.quality.format == format &&
+		(format != SUBSONIC_FORMAT_MP3 || g_settings.quality.max_bitrate == bitrate)) {
+		return;
+	}
+	g_settings.quality.format = format;
+	if (format == SUBSONIC_FORMAT_MP3) {
+		g_settings.quality.max_bitrate = bitrate;
 	}
 	subsonic_set_quality(g_settings.quality);
 	if (!settings_save(&g_settings)) {
 		morpthis_toast("Could not save settings.json.");
 	}
 	morpthis_app_post(settings_refresh_cb, NULL);
-	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
+	if (format == SUBSONIC_FORMAT_FLAC) {
 		morpthis_toast("Next track: FLAC lossless (server transcoding).");
-	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
+	} else if (format == SUBSONIC_FORMAT_RAW) {
 		morpthis_toast("Next track: the original file, no transcoding.");
 	} else {
 		char text[48];
-		snprintf(text, sizeof(text), "Next track: %d kbps MP3.", g_settings.quality.max_bitrate);
+		snprintf(text, sizeof(text), "Next track: %d kbps MP3.", bitrate);
 		morpthis_toast(text);
+	}
+}
+
+static void tls_chosen(int index, void *user) {
+	(void)user;
+	set_tls(index == 1);
+}
+
+static void quality_chosen(int index, void *user) {
+	(void)user;
+	switch (index) {
+	case 0:
+		set_quality(SUBSONIC_FORMAT_MP3, 256);
+		break;
+	case 1:
+		set_quality(SUBSONIC_FORMAT_MP3, 320);
+		break;
+	case 2:
+		set_quality(SUBSONIC_FORMAT_FLAC, 0);
+		break;
+	case 3:
+		set_quality(SUBSONIC_FORMAT_RAW, 0);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -1374,24 +1474,40 @@ static void reload_settings(morpthis_widget_t *widget, void *user) {
 	}
 }
 
-// One select callback for the whole page. The three action rows do what their
-// detail says; the information rows are still tappable and say where the file
-// lives, which is the only way to change the server or the account.
+// One select callback for the whole page. TLS and quality open the player's
+// popover next to the row, with the current choice ticked; the other rows do
+// what their detail says.
 static void settings_selected(morpthis_widget_t *list, int index, void *user) {
-	(void)list;
 	(void)user;
 	switch (index) {
-	case SETTINGS_ROW_TLS:
-		toggle_tls(NULL, NULL);
+	case SETTINGS_ROW_TLS: {
+		morpthis_menu_item_t items[2] = {
+			{"Strict", !g_settings.tls_relaxed},
+			{"Relaxed", g_settings.tls_relaxed},
+		};
+		if (!morpthis_menu_show_row(list, index, items, 2, tls_chosen, NULL)) {
+			morpthis_toast("Could not open the menu.");
+		}
 		break;
-	case SETTINGS_ROW_QUALITY:
-		toggle_quality(NULL, NULL);
+	}
+	case SETTINGS_ROW_QUALITY: {
+		bool mp3 = g_settings.quality.format == SUBSONIC_FORMAT_MP3;
+		morpthis_menu_item_t items[4] = {
+			{"MP3 256 kbps", mp3 && g_settings.quality.max_bitrate == 256},
+			{"MP3 320 kbps", mp3 && g_settings.quality.max_bitrate == 320},
+			{"FLAC (lossless)", g_settings.quality.format == SUBSONIC_FORMAT_FLAC},
+			{"Original", g_settings.quality.format == SUBSONIC_FORMAT_RAW},
+		};
+		if (!morpthis_menu_show_row(list, index, items, 4, quality_chosen, NULL)) {
+			morpthis_toast("Could not open the menu.");
+		}
 		break;
+	}
 	case SETTINGS_ROW_RELOAD:
 		reload_settings(NULL, NULL);
 		break;
 	default:
-		morpthis_toast("Edit merp_data/subsonic/settings.json, then Reload.");
+		morpthis_toast("Edit Apps/merp_data/subsonic/settings.json, then Reload.");
 		break;
 	}
 }
@@ -1774,13 +1890,14 @@ static bool create_now_screen(void) {
 	morpthis_widget_set_text_dim(g_now_format, true);
 	morpthis_widget_set_text_align(g_now_format, MORPTHIS_TEXT_RIGHT);
 
-	// A thin read-out bar. The player's is the same ten-pixel track; this one
-	// cannot seek, because a transcoded stream has no range the app can ask for.
+	// The player's ten-pixel bar, now a seek control: the thumb follows the
+	// finger while it moves, and the stream restarts at the chosen offset when it
+	// is let go. Subsonic takes the offset as `timeOffset`, in whole seconds.
 	int bar_y = info_y + info_h;
-	g_now_progress = morpthis_slider_create(g_now_screen, 0, 1000, 0, NULL, NULL);
+	g_now_progress = morpthis_slider_create(g_now_screen, 0, 1000, 0, now_seek_cb, NULL);
 	morpthis_widget_set_pos(g_now_progress, inset, bar_y);
 	morpthis_widget_set_size(g_now_progress, g_width - 2 * inset, bar_h);
-	morpthis_widget_set_enabled(g_now_progress, false);
+	morpthis_slider_set_release_cb(g_now_progress, now_seek_release_cb, NULL);
 
 	// Elapsed under the left end of the bar, total under the right, and how far
 	// through the queue the track is in the middle: the player's clock row.

@@ -1040,7 +1040,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 			morpthis_logw("doom", "no IWAD in %s", morpthis_fs_data_folder());
 			if (!show_error_screen("No WAD file was found. Copy the shareware doom1.wad "
 								   "(or your own doom.wad / doom2.wad) into "
-								   "merp_data/doom/ on the card, then start Doom again.")) {
+								   "Apps/merp_data/doom/ on the card, then start Doom again.")) {
 				return 1;
 			}
 		}

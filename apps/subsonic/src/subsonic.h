@@ -103,6 +103,12 @@ int subsonic_browse(subsonic_browse_t browse, const char *id, int offset,
 bool subsonic_stream_url(const char *id, subsonic_quality_t quality,
 						 char *out, size_t size, char *error, size_t error_size);
 
+// The same URL, asking the server to start `offset_seconds` into the file
+// (`timeOffset`). Servers that implement it start there; one that ignores the
+// parameter sends the beginning again. Zero is the normal start.
+bool subsonic_stream_url_at(const char *id, subsonic_quality_t quality, int offset_seconds,
+							char *out, size_t size, char *error, size_t error_size);
+
 // getCoverArt.view for `id`, at `size` pixels on the long edge (the server
 // scales it). Same auth and scheme as the stream URL.
 bool subsonic_cover_url(const char *id, int size, char *out, size_t out_size,

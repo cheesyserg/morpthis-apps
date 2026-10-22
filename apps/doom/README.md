@@ -15,7 +15,7 @@ that `DG_GetKey()` drains.
 ## Game data
 
 The repository does not contain a WAD. Copy one of these into the app's data
-folder, `merp_data/doom/` on the card (the package itself is read-only):
+folder, `Apps/merp_data/doom/` on the card (the package itself is read-only):
 
 - `doom1.wad` — the freely distributable shareware version
 - `doom.wad` or `doom2.wad` — a copy you own
@@ -109,7 +109,7 @@ keys turn for as long as they are held.
 ## Saving
 
 Doom writes savegames under `.savegame/` in the app's data folder
-(`merp_data/doom/` on the card). `doomgeneric` is built without `ORIGCODE`, so
+(`Apps/merp_data/doom/` on the card). `doomgeneric` is built without `ORIGCODE`, so
 it does not persist `default.cfg`; settings such as gamma and screen size reset
 on each launch. Savegames do survive.
 

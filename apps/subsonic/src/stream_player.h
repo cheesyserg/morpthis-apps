@@ -17,6 +17,7 @@ typedef struct {
 	char suffix[16];
 	char cover_art[SUBSONIC_ID_MAX];
 	int duration_ms;
+	int start_ms; // where this request begins; 0 for the normal start
 	subsonic_format_t format;
 } stream_track_t;
 
@@ -38,6 +39,12 @@ bool stream_player_start(const stream_track_t *track);
 
 // Stops the current stream; the worker stays alive for the next track.
 void stream_player_stop(void);
+
+// Restarts the current track at `position_ms`, asking the server to begin there
+// (Subsonic timeOffset, whole seconds). A paused track stays paused. False when
+// nothing has been loaded yet. Servers that ignore the parameter send the
+// track from the beginning again.
+bool stream_player_seek(int position_ms);
 
 // Holds the stream where it is. The socket stays open, so a pause that outlasts
 // the server's own timeout may end the track when it resumes.
