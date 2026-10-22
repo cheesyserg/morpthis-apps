@@ -19,7 +19,7 @@ than every streaming app copying `http.c` and `tls.c`.
 
 API 3 is the version this app targets (`min_player: 3`). It adds the player's
 own settings rows and keyboard, 24/32-bit PCM output, the status-bar playing
-flag, background operation, the explicit `hold_awake` power hold, the player's
+flag, background operation, the explicit AWAKE/NETWORK power holds, the player's
 icons, and a published track for the control centre. A 24-bit FLAC is written as left-justified S32, which the
 player hands to the built-in DAC as S24, so it is bit-perfect; 16-bit FLAC and
 MP3 stay at 16 bits, exactly as the player's own decoder treats them. Pressing
@@ -102,10 +102,11 @@ the control centre's now-playing card follow the app instead of the player's
 stopped queue. The card's transport buttons come back to the app, and tapping
 the card opens this app's now-playing page.
 
-While it is producing sound, the app's output counts as playback for the power
-manager: the display still turns off on the idle timer, but the device does not
-enter standby and the Wi-Fi radio is not parked, exactly as for a local track.
-Pausing hands the standby timer back.
+While a track is playing, the app holds `MORPTHIS_POWER_AWAKE |
+MORPTHIS_POWER_NETWORK`: the display still turns off on the idle timer, but the
+device does not enter standby and Wi-Fi is not parked. Pausing or
+stopping releases every hold. Raw PCM output is not a hold, so the player does
+not infer playback from the stream.
 
 | Control | Action |
 | --- | --- |
