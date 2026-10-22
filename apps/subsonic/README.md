@@ -19,8 +19,8 @@ than every streaming app copying `http.c` and `tls.c`.
 
 API 3 is the version this app targets (`min_player: 3`). It adds the player's
 own settings rows and keyboard, 24/32-bit PCM output, the status-bar playing
-flag, background operation, the player's icons, and a published track for the
-control centre. A 24-bit FLAC is written as left-justified S32, which the
+flag, background operation, the explicit `hold_awake` power hold, the player's
+icons, and a published track for the control centre. A 24-bit FLAC is written as left-justified S32, which the
 player hands to the built-in DAC as S24, so it is bit-perfect; 16-bit FLAC and
 MP3 stay at 16 bits, exactly as the player's own decoder treats them. Pressing
 BACK while music is loaded leaves the app in the background instead of closing

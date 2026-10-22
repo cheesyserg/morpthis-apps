@@ -498,6 +498,10 @@ static const subsonic_entry_t *current_entry(void) {
 // thread; it is also safe before the output is open, which is when a track has
 // just been chosen but the HTTP and TLS handshake is still running.
 static void publish_track(bool playing) {
+	// The explicit power hold. Opening the DAC or writing PCM is not enough for
+	// the player to treat this as music, and a game mixer feeding silence must
+	// not keep the device awake.
+	morpthis_system_hold_awake(playing);
 	const subsonic_entry_t *entry = current_entry();
 	if (!entry) {
 		morpthis_audio_set_track(NULL, false);
@@ -883,6 +887,9 @@ static void toggle_play_pause(void) {
 	}
 	g_paused = !g_paused;
 	stream_player_pause(g_paused);
+	// Publish again so the control centre and the power hold agree with the new
+	// transport state.
+	publish_track(!g_paused);
 	update_now_screen();
 	update_now_bar();
 	refresh_status();
@@ -989,6 +996,7 @@ static void stop_playback(morpthis_widget_t *widget, void *user) {
 	g_paused = false;
 	g_seeking = false;
 	g_have_error = false;
+	morpthis_system_hold_awake(false);
 	morpthis_audio_set_track(NULL, false);
 	update_playing_mark();
 	update_now_bar();
@@ -1260,6 +1268,7 @@ static void queue_clear(morpthis_widget_t *widget, void *user) {
 	g_playing = false;
 	g_paused = false;
 	g_seeking = false;
+	morpthis_system_hold_awake(false);
 	morpthis_audio_set_track(NULL, false);
 	update_queue_screen();
 	update_playing_mark();
@@ -1990,6 +1999,7 @@ MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
 	cover_worker_shutdown();
 	browse_worker_shutdown();
 	star_worker_shutdown();
+	morpthis_system_hold_awake(false);
 	morpthis_audio_set_track(NULL, false);
 	morpthis_logi("subsonic", "stopped");
 }
