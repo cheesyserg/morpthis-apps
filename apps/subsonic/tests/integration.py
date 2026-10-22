@@ -29,6 +29,11 @@ FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
 STREAM_FRAMES = 600
 STREAM = FRAME * STREAM_FRAMES
 
+# Every /rest/stream.view path the test binary asked for. The seek test checks
+# that the server was really told to start three seconds in.
+REQUEST_LOCK = threading.Lock()
+STREAM_REQUESTS: list[str] = []
+
 
 def crc(data: bytes, bits: int, polynomial: int) -> int:
     value = 0
@@ -168,6 +173,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 - the base name
+        if self.path.startswith("/rest/stream.view"):
+            with REQUEST_LOCK:
+                STREAM_REQUESTS.append(self.path)
         if self.path.startswith("/rest/getAlbum.view"):
             self.send_body(json.dumps(ALBUM).encode(), "application/json")
         elif self.path.startswith("/rest/getPlaylists.view"):
@@ -191,7 +199,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def run_case(binary: list[str], scheme: str, tls_mode: str, certfile: str | None = None,
-             keyfile: str | None = None) -> int:
+             keyfile: str | None = None) -> tuple[int, list[str]]:
+    with REQUEST_LOCK:
+        STREAM_REQUESTS.clear()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     if scheme == "https":
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -218,7 +228,9 @@ def run_case(binary: list[str], scheme: str, tls_mode: str, certfile: str | None
 
     if result.returncode != 0:
         print(f"integration: test binary exited {result.returncode}", file=sys.stderr)
-    return result.returncode
+    with REQUEST_LOCK:
+        requests = list(STREAM_REQUESTS)
+    return result.returncode, requests
 
 
 def make_self_signed(directory: str) -> tuple[str, str] | None:
@@ -241,7 +253,14 @@ def main(argv: list[str]) -> int:
         print("usage: integration.py <test-binary>", file=sys.stderr)
         return 2
 
-    if run_case(argv[1:], "http", "strict") != 0:
+    status, requests = run_case(argv[1:], "http", "strict")
+    if status != 0:
+        return 1
+    # The C test seeks to 3 s; the server must have been asked to start there
+    # rather than at the beginning of the file.
+    if not any("timeOffset=3" in path for path in requests):
+        print("integration: the seek did not reach the server as timeOffset=3", file=sys.stderr)
+        print(f"integration: stream requests were {requests}", file=sys.stderr)
         return 1
 
     if shutil.which("openssl") is None:
@@ -259,7 +278,11 @@ def main(argv: list[str]) -> int:
         # The certificate is self-signed, so relaxed is the mode a user with a
         # home server turns on. Strict is the default and is tested by the HTTP
         # case only: the point here is that the app can reach this server.
-        if run_case(argv[1:], "https", "relaxed", cert, key) != 0:
+        status, requests = run_case(argv[1:], "https", "relaxed", cert, key)
+        if status != 0:
+            return 1
+        if not any("timeOffset=3" in path for path in requests):
+            print("integration: the HTTPS seek did not reach the server", file=sys.stderr)
             return 1
 
     print("integration: ok")

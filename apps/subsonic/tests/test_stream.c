@@ -83,14 +83,21 @@ static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t event_cond = PTHREAD_COND_INITIALIZER;
 static bool finished;
 static bool failed;
+static int started_count;
 static char failure[192];
 
 static void on_event(stream_event_kind_t kind, const char *message,
 					 const stream_track_t *track, void *user) {
 	(void)track;
 	(void)user;
-	if (kind == STREAM_EVENT_STARTED || kind == STREAM_EVENT_LISTENED ||
-		kind == STREAM_EVENT_PROGRESS) {
+	if (kind == STREAM_EVENT_LISTENED || kind == STREAM_EVENT_PROGRESS) {
+		return;
+	}
+	if (kind == STREAM_EVENT_STARTED) {
+		pthread_mutex_lock(&event_lock);
+		started_count++;
+		pthread_cond_broadcast(&event_cond);
+		pthread_mutex_unlock(&event_lock);
 		return;
 	}
 	pthread_mutex_lock(&event_lock);
@@ -243,6 +250,54 @@ int main(int argc, char **argv) {
 	// 0 means the player's own frame-based sizing. Asking for 120 ms made the
 	// device's ALSA reject the buffer/period combination.
 	check(buffer_ms == 0, "the player's usual audio depth was requested");
+
+	// Seeking restarts the stream at the requested second. Check both halves:
+	// the clock starts at the offset immediately, and the stream really did
+	// restart with timeOffset (integration.py checks the request).
+	pthread_mutex_lock(&event_lock);
+	started_count = 0;
+	finished = false;
+	failed = false;
+	pthread_mutex_unlock(&event_lock);
+	track.duration_ms = 15000;
+	check(stream_player_start(&track), "seek test playback start");
+
+	pthread_mutex_lock(&event_lock);
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 10;
+	while (started_count < 1 && !failed) {
+		if (pthread_cond_timedwait(&event_cond, &event_lock, &deadline) != 0) {
+			break;
+		}
+	}
+	bool seek_started = started_count >= 1;
+	pthread_mutex_unlock(&event_lock);
+	check(seek_started, "the stream opened before seeking");
+	check(stream_player_position_ms() < 1000, "a fresh stream starts at zero");
+
+	check(stream_player_seek(3000), "seek accepted");
+	int seek_position = stream_player_position_ms();
+	check(seek_position >= 3000 && seek_position < 4000,
+		  "the clock starts at the seek offset, not at zero or the old position");
+
+	pthread_mutex_lock(&event_lock);
+	clock_gettime(CLOCK_REALTIME, &deadline);
+	deadline.tv_sec += 10;
+	while (started_count < 2 && !failed) {
+		if (pthread_cond_timedwait(&event_cond, &event_lock, &deadline) != 0) {
+			break;
+		}
+	}
+	bool seek_restarted = started_count >= 2;
+	pthread_mutex_unlock(&event_lock);
+	check(seek_restarted, "the stream restarted after the seek");
+
+	struct timespec seek_pause = {.tv_sec = 0, .tv_nsec = 120000000L};
+	nanosleep(&seek_pause, NULL);
+	int after_seek = stream_player_position_ms();
+	check(after_seek >= 3000, "the clock advances from the seek offset");
+	check(after_seek < 15000, "the clock stays inside the track");
+	stream_player_stop();
 
 	// Stop a second stream in the middle. The worker must wake from its read and
 	// leave no completion event for the abandoned generation.

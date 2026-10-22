@@ -324,11 +324,17 @@ static void play_one(const stream_track_t *track, unsigned generation) {
 	// a scrobble must never hold up the thread that feeds the DAC.
 	morpthis_logi("subsonic", "%s %d-bit at %d Hz, output %d-bit", flac_stream ? "FLAC" : "MP3",
 				  source_bits, rate, out_bits);
+	// A FLAC header carries the total frame count even when the server did not
+	// put a duration in the browse entry; without it the page has no seek bar.
+	int duration_ms = track->duration_ms;
+	if (duration_ms <= 0 && flac && flac->totalPCMFrameCount > 0 && flac->sampleRate > 0) {
+		duration_ms = (int)((flac->totalPCMFrameCount * 1000u) / flac->sampleRate);
+	}
 	// The offset the server was asked for is where the clock starts; without it
 	// the page would jump back to zero on every seek.
 	pthread_mutex_lock(&player.lock);
 	player.position_ms = track->start_ms;
-	player.duration_ms = track->duration_ms;
+	player.duration_ms = duration_ms;
 	player.source_rate = rate;
 	player.source_bits = source_bits;
 	player.source_flac = flac_stream;
@@ -473,17 +479,16 @@ bool stream_player_init(stream_event_cb cb, void *user) {
 	return player.started;
 }
 
-bool stream_player_start(const stream_track_t *track) {
-	if (!track || !player.started) {
-		return false;
-	}
-	pthread_mutex_lock(&player.lock);
+// Caller holds player.lock. Both a new track and a seek restart this way; the
+// seek keeps the pause state, which is why it cannot go through the public
+// start (that one always unpauses).
+static void start_locked(const stream_track_t *track, bool paused) {
 	player.request = *track;
 	player.has_request = true;
 	player.current = *track;
 	player.has_current = true;
 	player.abort = true; // stop whatever is running
-	player.paused = false;
+	player.paused = paused;
 	// The page switches to the new title before the handshake finishes; a
 	// position left over from the previous track would be shown against it.
 	player.position_ms = track->start_ms;
@@ -496,6 +501,14 @@ bool stream_player_start(const stream_track_t *track) {
 		shutdown(player.setup_fd, SHUT_RDWR);
 	}
 	pthread_cond_broadcast(&player.cond);
+}
+
+bool stream_player_start(const stream_track_t *track) {
+	if (!track || !player.started) {
+		return false;
+	}
+	pthread_mutex_lock(&player.lock);
+	start_locked(track, false);
 	pthread_mutex_unlock(&player.lock);
 	return true;
 }
@@ -529,25 +542,23 @@ bool stream_player_seek(int position_ms) {
 	}
 
 	pthread_mutex_lock(&player.lock);
-	bool have = player.has_current;
-	bool paused = player.paused;
-	stream_track_t track = player.current;
-	pthread_mutex_unlock(&player.lock);
-	if (!have) {
+	if (!player.has_current) {
+		pthread_mutex_unlock(&player.lock);
 		return false;
 	}
-
+	stream_track_t track = player.current;
+	bool paused = player.paused;
+	// Leave a little of the track to play; seeking exactly to the end would
+	// report FINISHED before the output even opened. The page clamps too, but a
+	// caller that seeks on its own must not be able to fall off the end.
+	if (player.duration_ms > 1000 && position_ms > player.duration_ms - 500) {
+		position_ms = player.duration_ms - 500;
+	}
 	// timeOffset is whole seconds, so the clock baseline is rounded to match
 	// what the server will actually send.
 	track.start_ms = (position_ms / 1000) * 1000;
-	if (!stream_player_start(&track)) {
-		return false;
-	}
-	if (paused) {
-		// A seek while paused prepares the new stream and leaves it paused; the
-		// worker reads this before it opens the output.
-		stream_player_pause(true);
-	}
+	start_locked(&track, paused);
+	pthread_mutex_unlock(&player.lock);
 	return true;
 }
 

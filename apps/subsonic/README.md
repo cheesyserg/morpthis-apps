@@ -17,19 +17,24 @@ player's HTTP/TLS stack as vendored sources. That is the point of the test: if
 streaming belongs in an app, the next step is an SDK networking call rather
 than every streaming app copying `http.c` and `tls.c`.
 
-API 2 is the version this app targets (`min_player: 2`). It adds what the
-client needs: 24/32-bit PCM output, the status-bar playing flag, background
-operation, the player's icon/text widgets, and a published track for the
+API 3 is the version this app targets (`min_player: 3`). It adds the player's
+own settings rows and keyboard, 24/32-bit PCM output, the status-bar playing
+flag, background operation, the player's icons, and a published track for the
 control centre. A 24-bit FLAC is written as left-justified S32, which the
 player hands to the built-in DAC as S24, so it is bit-perfect; 16-bit FLAC and
 MP3 stay at 16 bits, exactly as the player's own decoder treats them. Pressing
 BACK while music is loaded leaves the app in the background instead of closing
 it, and the player's status bar shows it is still playing.
 
+The account still lives in `settings.json`: the API 3 text prompt is used for
+search, and rewriting the credentials into a file the user already edits from a
+PC was deliberately left out of this release.
+
 ## Settings
 
-API 1 has no text-entry widget, so the account lives in a file. On the first
-launch the app writes a template to:
+The account lives in a file rather than in the app's UI: the credentials are
+typed once on a PC and the player never has to hold a keyboard buffer for them.
+On the first launch the app writes a template to:
 
 ```text
 <card>/Apps/merp_data/subsonic/settings.json
@@ -73,9 +78,10 @@ The quickest route to a working server:
 
 The first screen is a menu: **Artists**, **Albums**, **Folders**, **Playlists**,
 **Genres**, **Starred**, **Random**, **Newest** and **Search**. Tapping an artist
-shows albums, an album shows its tracks, and a track starts playing. The bottom
-row is **Stop** and **More**; the player's chevron, and the swipe-back, go up
-one level.
+shows albums, an album shows its tracks, and a track starts playing. There is no
+button strip at the bottom of the page: the list fills the screen, and the title
+row carries a play glyph (the now-playing page) and a More glyph (the menu).
+The player's chevron and the edge swipe go up one level.
 
 While a track is loaded, the status line at the top of the library becomes a
 mini-player row with the cover, title and artist. Tapping it opens the
@@ -103,23 +109,23 @@ Pausing hands the standby timer back.
 
 | Control | Action |
 | --- | --- |
-| **Stop** | Stops playback; the queue is kept. |
-| **More** | Opens the menu: **Now playing**, **Queue**, **Star current**, **Settings**, **Back**. |
+| Play glyph (title row) | Opens the now-playing page. |
+| More glyph (title row) | Opens the menu: **Now playing**, **Queue**, **Star current**, **Stop playback**, **Settings**. |
 | PLAY/PAUSE | Pauses and resumes the current stream. |
 | NEXT / PREV | Moves through the play queue, not the list on screen. |
-| BACK | Goes up one level in the library, from the now-playing page back to it, and back out of the app's other pages. At the root it leaves the app, or keeps it playing in the background when a track is loaded. |
+| BACK / edge swipe | Goes up one level in the library, and back through the app's own pages (settings to More, the queue and now-playing page to whatever opened them). At the root it leaves the app, or keeps it playing in the background when a track is loaded. |
 | Volume | Still the player's volume, not the app's. |
 
 Tapping a track queues every track in the list being looked at, starting with
 the one tapped. Browsing another album afterwards does not change what NEXT
 means; the queue survives until another track is tapped or **Queue → Clear**.
 
-**Search** opens a letter keyboard (A–Z, space, delete). **GO** shows matching
+**Search** opens the player's own keyboard. The accepted query shows matching
 songs, then albums, then artists. **Star current** stars or unstars the track
 that is playing; starred tracks are marked with a leading `*` in lists.
 
-The settings screen is a list of the player's two-line rows, each stating the
-value in force:
+The settings page is a scrolling column of the player's own settings rows, each
+with the value in force on the right:
 
 | Row | What it does |
 | --- | --- |
@@ -127,13 +133,13 @@ value in force:
 | **Streaming quality** | Opens a menu: MP3 256, MP3 320, FLAC (server transcodes) or Original (no transcoding), with the current choice ticked. |
 | **Reload settings** | Re-reads `settings.json` from the card. |
 | **Server**, **Account** | Read-only, so the current account is never a guess. |
-| **Settings file** | Where the file lives. Tapping any read-only row says how to edit it. |
+| **Settings file** | Where the file lives. |
 
 The first two write `settings.json`; they do not restart the current track, so
 the next stream uses the new setting. **Original** asks the server for the file
 itself, with no transcoding; it plays MP3 and FLAC originals and reports a
-clear error for any other codec. **Back**, the player's chevron and the
-swipe-back all return to the More menu.
+clear error for any other codec. There is no Back button: the player's chevron
+and the swipe-back return to the More menu.
 
 When a track ends, the app plays the next track in the queue. The start and the
 end of a listen of at least thirty seconds are reported to the server with
@@ -225,14 +231,16 @@ make -C apps/subsonic MORPTHIS_MODE=host test-integration
 make package                     # device toolchain + mksquashfs
 ```
 
-`test` is the SDK host smoke test: it opens the app menu and the settings screen
-and leaves. `test-integration` starts a Subsonic-compatible server on
-`127.0.0.1`, serves a valid silent MP3 and a real 24-bit FLAC stream over HTTP
-and, when `openssl` is available, over HTTPS with a self-signed certificate in
-relaxed mode. It exercises the real client, the JSON parser, dr_mp3, dr_flac
-and the PCM writes, checks the exact 327,680-frame lossless decode at 32-bit
-output, and stops a stream part-way to check that cancellation and teardown
-complete. It is not part of `make test` because it needs a listening loopback.
+`test` is the SDK host smoke test: it builds every screen (including the
+settings rows) and leaves through BACK at the root. `test-integration` starts a
+Subsonic-compatible server on `127.0.0.1`, serves a valid silent MP3 and a real
+24-bit FLAC stream over HTTP and, when `openssl` is available, over HTTPS with a
+self-signed certificate in relaxed mode. It exercises the real client, the JSON
+parser, dr_mp3, dr_flac and the PCM writes, checks the exact 327,680-frame
+lossless decode at 32-bit output, seeks to three seconds and checks both the
+clock baseline and the `timeOffset` request the server received, and stops a
+stream part-way to check that cancellation and teardown complete. It is not part
+of `make test` because it needs a listening loopback.
 
 `make package` writes `dist/subsonic.pkgmerp`; copy it to
 `Apps/pkgmerps/subsonic.pkgmerp`. The writable folder, including

@@ -7,9 +7,10 @@ APP_INCLUDES := -Isrc/vendor
 APP_LIBS := -lpthread -ldl
 # http.c and tls.c use strcasestr, res_init and MSG_NOSIGNAL.
 APP_CFLAGS := -D_GNU_SOURCE
-# The settings screen is reachable without a network or a server. More now
-# leads to the app menu; Settings follows Now playing, Queue and Star.
-APP_TEST_SCRIPT := sleep:200; click:More; sleep:100; click:Now playing; sleep:100; press:back; sleep:100; click:More; sleep:100; click:Settings; sleep:100; click:Back; sleep:100; click:Back; sleep:100; press:back
+# The host runtime clicks text buttons by label, and the library and settings
+# pages are now the player's list/settings rows with icon corner buttons. The
+# smoke test therefore checks construction and a clean BACK out of the root.
+APP_TEST_SCRIPT := sleep:300; press:back
 
 MORPTHIS_SDK ?= $(abspath ../../../morpthis-sdk)
 include $(MORPTHIS_SDK)/app.mk

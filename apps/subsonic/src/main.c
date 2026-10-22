@@ -5,10 +5,10 @@
 // morpthis_audio_open/write, does its own HTTP and TLS, and carries dr_mp3 and
 // dr_flac.
 //
-// API 1 has no text-entry widget, so the server, username and password come
-// from Apps/merp_data/subsonic/settings.json. The settings screen shows the path and
-// opens the changeable values as menus: strict or relaxed TLS, and the stream
-// quality.
+// API 3 gives the app the player's own settings rows and keyboard. The account
+// is still edited in Apps/merp_data/subsonic/settings.json; the settings page
+// exposes the values that can change from the device (TLS mode and stream
+// quality) as the player's popover menus. Search uses the player's keyboard.
 
 #include <morpthis/morpthis.h>
 
@@ -67,14 +67,49 @@ static morpthis_screen_t *g_main_screen;
 static morpthis_screen_t *g_settings_screen;
 static morpthis_screen_t *g_more_screen;
 static morpthis_screen_t *g_queue_screen;
-static morpthis_screen_t *g_search_screen;
 static morpthis_screen_t *g_now_screen;
-static morpthis_screen_t *g_queue_return; // where the queue was opened from
+
+// The app's own page stack. The player draws the swipe and the chevron, but it
+// cannot know that More was opened from the now-playing page rather than from
+// the library; this is what makes BACK retrace the real route.
+#define NAV_MAX 12
+static morpthis_screen_t *g_nav[NAV_MAX];
+static int g_nav_depth;
+
+static void nav_clear(void) { g_nav_depth = 0; }
+
+static void navigate_to(morpthis_screen_t *target) {
+	morpthis_screen_t *active = morpthis_screen_active();
+	if (active && active != target) {
+		if (g_nav_depth > 0 && g_nav[g_nav_depth - 1] == active) {
+			// Already recorded; a re-entry must not grow the stack.
+		} else if (g_nav_depth < NAV_MAX) {
+			g_nav[g_nav_depth++] = active;
+		} else {
+			// A very long session must not wedge: drop the oldest step. The
+			// pages are all still built, so the pointer stays valid.
+			memmove(&g_nav[0], &g_nav[1], sizeof(g_nav[0]) * (NAV_MAX - 1));
+			g_nav[NAV_MAX - 1] = active;
+		}
+	}
+	morpthis_screen_load(target);
+}
+
+static bool navigate_back(void) {
+	while (g_nav_depth > 0) {
+		morpthis_screen_t *target = g_nav[--g_nav_depth];
+		if (target && target != morpthis_screen_active()) {
+			morpthis_screen_load(target);
+			return true;
+		}
+	}
+	return false;
+}
+
 static morpthis_widget_t *g_status;
 static morpthis_widget_t *g_list;
-static morpthis_widget_t *g_more_star;
 static morpthis_widget_t *g_queue_list;
-static morpthis_widget_t *g_search_label;
+static morpthis_widget_t *g_more_list;
 
 // The mini-player row at the top of the library and the full now-playing page.
 static morpthis_widget_t *g_now_bar;
@@ -99,7 +134,11 @@ static char g_now_cover_path[32];
 static unsigned g_now_cover_applied; // the generation whose file is on the page
 static unsigned g_cover_generation;
 
-static morpthis_widget_t *g_settings_list;
+static morpthis_widget_t *g_settings_container;
+static morpthis_widget_t *g_settings_tls;
+static morpthis_widget_t *g_settings_quality;
+static morpthis_widget_t *g_settings_server;
+static morpthis_widget_t *g_settings_account;
 
 static subsonic_settings_t g_settings;
 static subsonic_entry_t g_entries[MAX_ENTRIES];
@@ -138,7 +177,6 @@ static void open_settings(morpthis_widget_t *widget, void *user);
 static void open_more(morpthis_widget_t *widget, void *user);
 static void open_queue(morpthis_widget_t *widget, void *user);
 static void open_search(morpthis_widget_t *widget, void *user);
-static void back_to_main(morpthis_widget_t *widget, void *user);
 
 // ---------------------------------------------------------------------------
 // Text
@@ -235,7 +273,7 @@ static void refresh_status(void) {
 	} else if (g_browsing) {
 		set_status("Loading...", current_view_title());
 	} else if (!g_settings.configured) {
-		set_status("Not configured.", "Tap More for settings.");
+		set_status("Not configured.", "Open More for settings.");
 	} else if (g_depth > 0 && g_entry_count > 0) {
 		char count[32];
 		snprintf(count, sizeof(count), "%d %s", g_entry_count, entry_noun());
@@ -249,7 +287,7 @@ static void show_error(const char *where, const char *message) {
 	clip(g_last_error, sizeof(g_last_error), message ? message : "Unknown error.", 96);
 	g_have_error = true;
 	morpthis_loge("subsonic", "%s: %s", where, g_last_error);
-	morpthis_toast(g_last_error);
+	morpthis_toast_error(g_last_error);
 	refresh_status();
 }
 
@@ -275,7 +313,7 @@ static void update_now_bar(void) {
 			morpthis_widget_set_visible(g_status, true);
 		}
 		morpthis_widget_set_pos(g_list, 0, 34);
-		morpthis_widget_set_size(g_list, g_width, g_height - 34 - 44);
+		morpthis_widget_set_size(g_list, g_width, g_height - 34);
 		return;
 	}
 
@@ -293,7 +331,7 @@ static void update_now_bar(void) {
 		morpthis_widget_set_visible(g_status, false);
 	}
 	morpthis_widget_set_pos(g_list, 0, 48);
-	morpthis_widget_set_size(g_list, g_width, g_height - 48 - 44);
+	morpthis_widget_set_size(g_list, g_width, g_height - 48);
 }
 
 static void update_now_screen(void) {
@@ -384,7 +422,7 @@ static void show_now_playing(morpthis_widget_t *widget, void *user) {
 		return;
 	}
 	update_now_screen();
-	morpthis_screen_load(g_now_screen);
+	navigate_to(g_now_screen);
 }
 
 // The progress bar maps 0..1000 to the track's length. -1 when the length is
@@ -586,6 +624,9 @@ static void show_root(void) {
 	g_root_fallback_done = false;
 	g_browsing = false;
 	g_have_error = false;
+	// The library root is the bottom of the app: nothing is under it to go
+	// back to, including after a settings reload loaded this page directly.
+	nav_clear();
 	g_entry_count = ROOT_COUNT;
 	for (int i = 0; i < ROOT_COUNT; i++) {
 		memset(&g_entries[i], 0, sizeof(g_entries[i]));
@@ -604,6 +645,7 @@ static void show_not_configured(void) {
 	g_entry_count = 0;
 	g_browsing = false;
 	g_have_error = false;
+	nav_clear();
 	if (g_list) {
 		morpthis_list_clear(g_list);
 	}
@@ -881,6 +923,9 @@ static void on_stream_event(stream_event_kind_t kind, const char *message,
 		return;
 	}
 	if (kind == STREAM_EVENT_STARTED) {
+		// A stream (re)start is a definitive reset: if a release was lost, the
+		// page must follow the new stream rather than stay frozen on a drag.
+		g_seeking = false;
 		if (track) {
 			enqueue_scrobble(track->id, false);
 		}
@@ -1010,7 +1055,7 @@ static void star_done(void *user) {
 	}
 	render_entries();
 	update_more_screen();
-	morpthis_toast(result->on ? "Starred." : "Unstarred.");
+	morpthis_toast_success(result->on ? "Starred." : "Unstarred.");
 	free(result);
 }
 
@@ -1135,18 +1180,46 @@ static void enqueue_scrobble(const char *id, bool submission) {
 // More, queue and search
 // ---------------------------------------------------------------------------
 
+static void more_selected(morpthis_widget_t *list, int index, void *user) {
+	(void)list;
+	(void)user;
+	switch (index) {
+	case 0:
+		show_now_playing(NULL, NULL);
+		break;
+	case 1:
+		open_queue(NULL, NULL);
+		break;
+	case 2:
+		toggle_star(NULL, NULL);
+		break;
+	case 3:
+		stop_playback(NULL, NULL);
+		break;
+	case 4:
+		open_settings(NULL, NULL);
+		break;
+	default:
+		break;
+	}
+}
+
+// Rebuilt every time the page opens, so the star row names the action the tap
+// will take. The player's own library rows are the model: title, dim detail,
+// and a chevron on the rows that open another page.
 static void update_more_screen(void) {
-	if (!g_more_star) {
+	if (!g_more_list) {
 		return;
 	}
 	bool have = g_queue_index >= 0 && g_queue_index < g_queue_count;
-	morpthis_widget_set_enabled(g_more_star, have);
-	if (!have) {
-		morpthis_widget_set_text(g_more_star, "Star current");
-		return;
-	}
-	morpthis_widget_set_text(g_more_star,
-						 g_queue[g_queue_index].starred ? "Unstar current" : "Star current");
+	morpthis_list_clear(g_more_list);
+	morpthis_list_add_entry(g_more_list, "Now playing", "The current track and its controls", NULL, true);
+	morpthis_list_add_entry(g_more_list, "Queue", "What plays next, and Clear", NULL, true);
+	morpthis_list_add_entry(g_more_list,
+						 have && g_queue[g_queue_index].starred ? "Unstar current" : "Star current",
+						 have ? "The track that is playing" : "Nothing is playing", NULL, false);
+	morpthis_list_add_entry(g_more_list, "Stop playback", "The queue is kept for later", NULL, false);
+	morpthis_list_add_entry(g_more_list, "Settings", "Account, TLS and streaming quality", NULL, true);
 }
 
 static void update_queue_screen(void) {
@@ -1196,37 +1269,18 @@ static void queue_clear(morpthis_widget_t *widget, void *user) {
 	refresh_status();
 }
 
-static void queue_back(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
-	morpthis_screen_load(g_queue_return ? g_queue_return : g_main_screen);
-	refresh_status();
-}
-
 static void open_more(morpthis_widget_t *widget, void *user) {
 	(void)widget;
 	(void)user;
 	update_more_screen();
-	morpthis_screen_load(g_more_screen);
+	navigate_to(g_more_screen);
 }
 
 static void open_queue(morpthis_widget_t *widget, void *user) {
 	(void)widget;
 	(void)user;
-	// The row means "the queue", so coming back must land on the page it was
-	// opened from: the player's queue sheet behaves the same way.
-	g_queue_return = morpthis_screen_active();
 	update_queue_screen();
-	morpthis_screen_load(g_queue_screen);
-}
-
-static void update_search_screen(void) {
-	if (!g_search_label) {
-		return;
-	}
-	char text[96];
-	snprintf(text, sizeof(text), "Search: %s_", g_search_query);
-	morpthis_widget_set_text(g_search_label, text);
+	navigate_to(g_queue_screen);
 }
 
 static void search_go(void) {
@@ -1234,55 +1288,35 @@ static void search_go(void) {
 		morpthis_toast("Type something first.");
 		return;
 	}
-	if (g_depth >= MAX_DEPTH) {
-		morpthis_toast("Too many levels.");
-		return;
-	}
 	g_depth = 0;
 	view_t *view = &g_views[g_depth++];
 	view->kind = SUBSONIC_BROWSE_SEARCH;
 	snprintf(view->id, sizeof(view->id), "%s", g_search_query);
-	snprintf(view->title, sizeof(view->title), "Search: %s", g_search_query);
+	char title[128];
+	snprintf(title, sizeof(title), "Search: %s", g_search_query);
+	clip(view->title, sizeof(view->title), title, sizeof(view->title) - 1);
 	morpthis_screen_load(g_main_screen);
 	request_view();
 }
 
-static void search_key(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	const char *key = user;
-	if (!key) {
+// API 3 gives apps the player's own keyboard, so the hand-built A-Z page and
+// its screen are gone. The query is kept as the initial text, which makes a
+// second search a small edit rather than typing it all again.
+static void search_prompt_done(bool accepted, const char *text, void *user) {
+	(void)user;
+	if (g_shutting_down || !accepted || !text) {
 		return;
 	}
-	size_t len = strlen(g_search_query);
-	if (strcmp(key, "ESC") == 0) {
-		morpthis_screen_load(g_main_screen);
-		refresh_status();
-		return;
-	} else if (strcmp(key, "GO") == 0) {
-		search_go();
-		return;
-	} else if (strcmp(key, "DEL") == 0) {
-		if (len > 0) {
-			g_search_query[len - 1] = '\0';
-		}
-	} else if (strcmp(key, "SP") == 0) {
-		if (len + 1 < sizeof(g_search_query)) {
-			g_search_query[len] = ' ';
-			g_search_query[len + 1] = '\0';
-		}
-	} else if (len + 1 < sizeof(g_search_query)) {
-		g_search_query[len] = key[0];
-		g_search_query[len + 1] = '\0';
-	}
-	update_search_screen();
+	clip(g_search_query, sizeof(g_search_query), text, sizeof(g_search_query) - 1);
+	search_go();
 }
 
 static void open_search(morpthis_widget_t *widget, void *user) {
 	(void)widget;
 	(void)user;
-	g_search_query[0] = '\0';
-	update_search_screen();
-	morpthis_screen_load(g_search_screen);
+	if (!morpthis_ui_prompt_text("Search", g_search_query, false, search_prompt_done, NULL)) {
+		morpthis_toast("The player's keyboard is not available here.");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,65 +1344,40 @@ static bool apply_settings(char *error, size_t error_size) {
 	return subsonic_configure(&g_settings.credentials, g_settings.quality, error, error_size);
 }
 
-// The settings rows. The list is rebuilt when one of them changes a value, so
-// the detail line under each title always states what is in force.
-enum {
-	SETTINGS_ROW_TLS = 0,
-	SETTINGS_ROW_QUALITY,
-	SETTINGS_ROW_RELOAD,
-	SETTINGS_ROW_SERVER,
-	SETTINGS_ROW_ACCOUNT,
-	SETTINGS_ROW_FILE,
-};
-
-static void update_settings_screen(void) {
-	if (!g_settings_list) {
-		return;
+// The settings page is the player's own shape now: a scrolling column of
+// settings rows, each with its value on the right. The two rows that change a
+// setting open the player's popover anchored to the row that was tapped.
+static void update_settings_values(void) {
+	if (g_settings_tls) {
+		morpthis_settings_row_set_value(g_settings_tls, g_settings.tls_relaxed ? "Relaxed" : "Strict");
 	}
-	morpthis_list_clear(g_settings_list);
-
-	morpthis_list_add_entry(g_settings_list, "TLS verification",
-							g_settings.tls_relaxed ? "Relaxed, self-signed accepted"
-												  : "Strict, certificate verified",
-							NULL, false);
-
-	char quality[64];
-	if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
-		snprintf(quality, sizeof(quality), "FLAC lossless");
-	} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
-		snprintf(quality, sizeof(quality), "Original, no transcoding");
-	} else {
-		snprintf(quality, sizeof(quality), "MP3 %d kbps", g_settings.quality.max_bitrate);
+	if (g_settings_quality) {
+		char quality[48];
+		if (g_settings.quality.format == SUBSONIC_FORMAT_FLAC) {
+			snprintf(quality, sizeof(quality), "FLAC lossless");
+		} else if (g_settings.quality.format == SUBSONIC_FORMAT_RAW) {
+			snprintf(quality, sizeof(quality), "Original");
+		} else {
+			snprintf(quality, sizeof(quality), "MP3 %d kbps", g_settings.quality.max_bitrate);
+		}
+		morpthis_settings_row_set_value(g_settings_quality, quality);
 	}
-	morpthis_list_add_entry(g_settings_list, "Streaming quality", quality, NULL, false);
-
-	morpthis_list_add_entry(g_settings_list, "Reload settings", "Re-read settings.json from the card",
-							NULL, false);
-
-	char server[96];
-	clip(server, sizeof(server),
-		 g_settings_valid && g_settings.credentials.server[0] ? g_settings.credentials.server
-															: "Not configured",
-		 80);
-	morpthis_list_add_entry(g_settings_list, "Server", server, NULL, false);
-
-	char account[64];
-	clip(account, sizeof(account),
-		 g_settings_valid && g_settings.credentials.username[0] ? g_settings.credentials.username
-																   : "Not configured",
-		 48);
-	morpthis_list_add_entry(g_settings_list, "Account", account, NULL, false);
-
-	// The file itself, and the reminder that it is edited outside the app.
-	morpthis_list_add_entry(g_settings_list, "Settings file",
-							"Apps/merp_data/subsonic/settings.json", NULL, false);
-}
-
-// Rebuilding the list destroys the row whose select callback is running, so a
-// value change asks the GUI loop to do it once that dispatch has returned.
-static void settings_refresh_cb(void *user) {
-	(void)user;
-	update_settings_screen();
+	if (g_settings_server) {
+		char server[96];
+		clip(server, sizeof(server),
+			 g_settings_valid && g_settings.credentials.server[0] ? g_settings.credentials.server
+														  : "Not configured",
+			 80);
+		morpthis_settings_row_set_value(g_settings_server, server);
+	}
+	if (g_settings_account) {
+		char account[64];
+		clip(account, sizeof(account),
+			 g_settings_valid && g_settings.credentials.username[0] ? g_settings.credentials.username
+														 : "Not configured",
+			 48);
+		morpthis_settings_row_set_value(g_settings_account, account);
+	}
 }
 
 static void set_tls(bool relaxed) {
@@ -1387,7 +1396,7 @@ static void set_tls(bool relaxed) {
 	if (!apply_settings(error, sizeof(error))) {
 		morpthis_toast(error);
 	}
-	morpthis_app_post(settings_refresh_cb, NULL);
+	update_settings_values();
 	morpthis_toast(relaxed ? "Self-signed certificates are accepted." : "Strict TLS checking.");
 }
 
@@ -1408,7 +1417,7 @@ static void set_quality(subsonic_format_t format, int bitrate) {
 	if (!settings_save(&g_settings)) {
 		morpthis_toast("Could not save settings.json.");
 	}
-	morpthis_app_post(settings_refresh_cb, NULL);
+	update_settings_values();
 	if (format == SUBSONIC_FORMAT_FLAC) {
 		morpthis_toast("Next track: FLAC lossless (server transcoding).");
 	} else if (format == SUBSONIC_FORMAT_RAW) {
@@ -1445,6 +1454,45 @@ static void quality_chosen(int index, void *user) {
 	}
 }
 
+static void tls_row_cb(morpthis_widget_t *row, void *user) {
+	(void)user;
+	morpthis_menu_item_t items[2] = {
+		{"Strict", !g_settings.tls_relaxed},
+		{"Relaxed", g_settings.tls_relaxed},
+	};
+	if (!morpthis_menu_show(row, items, 2, tls_chosen, NULL)) {
+		morpthis_toast("Could not open the menu.");
+	}
+}
+
+static void quality_row_cb(morpthis_widget_t *row, void *user) {
+	(void)user;
+	bool mp3 = g_settings.quality.format == SUBSONIC_FORMAT_MP3;
+	morpthis_menu_item_t items[4] = {
+		{"MP3 256 kbps", mp3 && g_settings.quality.max_bitrate == 256},
+		{"MP3 320 kbps", mp3 && g_settings.quality.max_bitrate == 320},
+		{"FLAC (lossless)", g_settings.quality.format == SUBSONIC_FORMAT_FLAC},
+		{"Original (no transcoding)", g_settings.quality.format == SUBSONIC_FORMAT_RAW},
+	};
+	if (!morpthis_menu_show(row, items, 4, quality_chosen, NULL)) {
+		morpthis_toast("Could not open the menu.");
+	}
+}
+
+static void file_row_cb(morpthis_widget_t *row, void *user) {
+	(void)row;
+	(void)user;
+	morpthis_toast("Edit Apps/merp_data/subsonic/settings.json, then Reload settings.");
+}
+
+// The network is not reachable from the settings page, so the account rows only
+// say what is in force. Editing happens in the file, from USB or ADB.
+static void account_row_cb(morpthis_widget_t *row, void *user) {
+	(void)row;
+	(void)user;
+	morpthis_toast("Edit settings.json on the card, then Reload settings.");
+}
+
 static void reload_settings(morpthis_widget_t *widget, void *user) {
 	(void)widget;
 	(void)user;
@@ -1461,11 +1509,10 @@ static void reload_settings(morpthis_widget_t *widget, void *user) {
 		morpthis_toast(error);
 		// The account was replaced but could not be applied; keep the rows
 		// truthful about what the app now holds.
-		morpthis_app_post(settings_refresh_cb, NULL);
+		update_settings_values();
 		return;
 	}
-	// The screen is being left, so the list is rebuilt the next time it opens;
-	// doing it from this row's callback would destroy the row mid-dispatch.
+	update_settings_values();
 	morpthis_screen_load(g_main_screen);
 	if (g_settings.configured) {
 		show_root();
@@ -1474,56 +1521,11 @@ static void reload_settings(morpthis_widget_t *widget, void *user) {
 	}
 }
 
-// One select callback for the whole page. TLS and quality open the player's
-// popover next to the row, with the current choice ticked; the other rows do
-// what their detail says.
-static void settings_selected(morpthis_widget_t *list, int index, void *user) {
-	(void)user;
-	switch (index) {
-	case SETTINGS_ROW_TLS: {
-		morpthis_menu_item_t items[2] = {
-			{"Strict", !g_settings.tls_relaxed},
-			{"Relaxed", g_settings.tls_relaxed},
-		};
-		if (!morpthis_menu_show_row(list, index, items, 2, tls_chosen, NULL)) {
-			morpthis_toast("Could not open the menu.");
-		}
-		break;
-	}
-	case SETTINGS_ROW_QUALITY: {
-		bool mp3 = g_settings.quality.format == SUBSONIC_FORMAT_MP3;
-		morpthis_menu_item_t items[4] = {
-			{"MP3 256 kbps", mp3 && g_settings.quality.max_bitrate == 256},
-			{"MP3 320 kbps", mp3 && g_settings.quality.max_bitrate == 320},
-			{"FLAC (lossless)", g_settings.quality.format == SUBSONIC_FORMAT_FLAC},
-			{"Original", g_settings.quality.format == SUBSONIC_FORMAT_RAW},
-		};
-		if (!morpthis_menu_show_row(list, index, items, 4, quality_chosen, NULL)) {
-			morpthis_toast("Could not open the menu.");
-		}
-		break;
-	}
-	case SETTINGS_ROW_RELOAD:
-		reload_settings(NULL, NULL);
-		break;
-	default:
-		morpthis_toast("Edit Apps/merp_data/subsonic/settings.json, then Reload.");
-		break;
-	}
-}
-
-static void back_to_main(morpthis_widget_t *widget, void *user) {
-	(void)widget;
-	(void)user;
-	morpthis_screen_load(g_main_screen);
-	refresh_status();
-}
-
 static void open_settings(morpthis_widget_t *widget, void *user) {
 	(void)widget;
 	(void)user;
-	update_settings_screen();
-	morpthis_screen_load(g_settings_screen);
+	update_settings_values();
+	navigate_to(g_settings_screen);
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,22 +1606,18 @@ static void on_button(morpthis_button_t button, morpthis_input_action_t action, 
 	case MORPTHIS_BUTTON_BACK: {
 		morpthis_screen_t *active = morpthis_screen_active();
 		bool stays = true;
-		if (active && active == g_now_screen) {
-			morpthis_screen_load(g_main_screen);
-			refresh_status();
-		} else if (active && active == g_search_screen) {
-			morpthis_screen_load(g_main_screen);
-			refresh_status();
-		} else if (active && active == g_settings_screen) {
-			open_more(NULL, NULL);
-		} else if (active && active == g_queue_screen) {
-			queue_back(NULL, NULL);
-		} else if (active && active == g_more_screen) {
-			back_to_main(NULL, NULL);
-		} else if (active && active == g_main_screen && g_depth > 0) {
+		if (active && active == g_main_screen && g_depth > 0) {
 			// The player's chevron is the library's way up, as it is everywhere
 			// else in the player. Only the root uses it to leave the app.
 			go_up(NULL, NULL);
+		} else if (active && active != g_main_screen) {
+			// Every app page was reached through navigate_to(), so the stack has
+			// the page below it: the queue returns to its opener, settings to
+			// More, the now-playing page to whatever opened it.
+			if (!navigate_back()) {
+				morpthis_screen_load(g_main_screen);
+				refresh_status();
+			}
 		} else {
 			// At the root: a music app that is playing stays loaded instead. The
 			// chevron hides its screens and the sound keeps going, and the status
@@ -1658,9 +1656,10 @@ static bool create_main_screen(void) {
 	morpthis_widget_set_pos(g_status, 0, 0);
 	morpthis_widget_set_size(g_status, g_width, 30);
 
+	// The list fills the page: there is no button strip at the bottom any more.
 	g_list = morpthis_list_create(g_main_screen);
 	morpthis_widget_set_pos(g_list, 0, 34);
-	morpthis_widget_set_size(g_list, g_width, g_height - 34 - 44);
+	morpthis_widget_set_size(g_list, g_width, g_height - 34);
 	morpthis_list_set_select_cb(g_list, on_select, NULL);
 
 	// The mini-player: the playing track, in the same row the library uses, on
@@ -1672,23 +1671,10 @@ static bool create_main_screen(void) {
 	morpthis_list_set_select_cb(g_now_bar, now_bar_selected, NULL);
 	morpthis_widget_set_visible(g_now_bar, false);
 
-	// The title row's action: the player's play glyph, opening the now-playing
-	// page. The player's own down-chevron still sits to its right.
+	// The title row carries both actions, beside the player's own down-chevron:
+	// the now-playing page and the More menu.
 	morpthis_screen_add_corner_button(g_main_screen, MORPTHIS_ICON_PLAY, show_now_playing, NULL);
-
-	int width = (g_width - 6) / 2;
-	if (width < 50) {
-		return false;
-	}
-	int y = g_height - 38;
-
-	morpthis_widget_t *stop = morpthis_button_create(g_main_screen, "Stop", stop_playback, NULL);
-	morpthis_widget_set_pos(stop, 0, y);
-	morpthis_widget_set_size(stop, width, 32);
-
-	morpthis_widget_t *more = morpthis_button_create(g_main_screen, "More", open_more, NULL);
-	morpthis_widget_set_pos(more, width + 6, y);
-	morpthis_widget_set_size(more, width, 32);
+	morpthis_screen_add_corner_button(g_main_screen, MORPTHIS_ICON_MORE, open_more, NULL);
 
 	return true;
 }
@@ -1699,56 +1685,65 @@ static bool create_settings_screen(void) {
 		return false;
 	}
 
-	// The player's settings pages are cards of title/detail rows, and this is
-	// the same shape: the tap target is the whole row, the detail line states
-	// the value in force, and Back stays at the bottom for the pointer.
-	g_settings_list = morpthis_list_create(g_settings_screen);
-	morpthis_widget_set_pos(g_settings_list, 0, 0);
-	morpthis_widget_set_size(g_settings_list, g_width, g_height - 44);
-	morpthis_list_set_select_cb(g_settings_list, settings_selected, NULL);
+	// The player's own settings page: a scrolling column of cards, each with the
+	// value in force on the right. The edge swipe and the chevron are the way
+	// back, so there is no Back button at the bottom.
+	g_settings_container = morpthis_container_create(g_settings_screen);
+	if (!g_settings_container) {
+		return false;
+	}
+	morpthis_widget_set_pos(g_settings_container, 0, 0);
+	morpthis_widget_set_size(g_settings_container, g_width, g_height);
+	morpthis_widget_set_padding(g_settings_container, 12, 8, 12, 8);
+	morpthis_container_set_layout(g_settings_container, MORPTHIS_LAYOUT_COLUMN, MORPTHIS_ALIGN_START,
+								  MORPTHIS_ALIGN_CENTER, 6);
+	morpthis_container_set_scrollable(g_settings_container, true);
 
-	int button_width = g_width - 40;
-	if (button_width < 80) {
+	g_settings_tls = morpthis_settings_row_create(g_settings_screen, "TLS verification",
+												  "Strict verifies the certificate", "Strict", tls_row_cb, NULL);
+	g_settings_quality = morpthis_settings_row_create(g_settings_screen, "Streaming quality",
+													  "What the server sends", "MP3 256 kbps",
+													  quality_row_cb, NULL);
+	morpthis_widget_t *server = morpthis_settings_row_create(
+		g_settings_screen, "Server", "Change it in settings.json", "", account_row_cb, NULL);
+	morpthis_widget_t *account = morpthis_settings_row_create(
+		g_settings_screen, "Account", "Change it in settings.json", "", account_row_cb, NULL);
+	morpthis_widget_t *reload = morpthis_settings_row_create(
+		g_settings_screen, "Reload settings", "Re-read settings.json from the card", "",
+		reload_settings, NULL);
+	morpthis_widget_t *file = morpthis_settings_row_create(
+		g_settings_screen, "Settings file", "Apps/merp_data/subsonic/settings.json", "On the card",
+		file_row_cb, NULL);
+	if (!g_settings_tls || !g_settings_quality || !server || !account || !reload || !file) {
 		return false;
 	}
 
-	morpthis_widget_t *back = morpthis_button_create(g_settings_screen, "Back", open_more, NULL);
-	morpthis_widget_set_pos(back, 20, g_height - 38);
-	morpthis_widget_set_size(back, button_width, 34);
+	g_settings_server = server;
+	g_settings_account = account;
+	morpthis_widget_t *const rows[] = {
+		g_settings_tls, g_settings_quality, server, account, reload, file,
+	};
+	for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+		morpthis_widget_set_parent(rows[i], g_settings_container);
+	}
 
+	update_settings_values();
 	return true;
 }
 
 static bool create_more_screen(void) {
-	g_more_screen = morpthis_screen_create("Subsonic");
+	g_more_screen = morpthis_screen_create("More");
 	if (!g_more_screen) {
 		return false;
 	}
-	int width = g_width - 40;
-	if (width < 80) {
+
+	g_more_list = morpthis_list_create(g_more_screen);
+	if (!g_more_list) {
 		return false;
 	}
-
-	morpthis_widget_t *now = morpthis_button_create(g_more_screen, "Now playing", show_now_playing, NULL);
-	morpthis_widget_set_pos(now, 20, 0);
-	morpthis_widget_set_size(now, width, 36);
-
-	morpthis_widget_t *queue = morpthis_button_create(g_more_screen, "Queue", open_queue, NULL);
-	morpthis_widget_set_pos(queue, 20, 40);
-	morpthis_widget_set_size(queue, width, 36);
-
-	g_more_star = morpthis_button_create(g_more_screen, "Star current", toggle_star, NULL);
-	morpthis_widget_set_pos(g_more_star, 20, 80);
-	morpthis_widget_set_size(g_more_star, width, 36);
-
-	morpthis_widget_t *settings = morpthis_button_create(g_more_screen, "Settings", open_settings, NULL);
-	morpthis_widget_set_pos(settings, 20, 120);
-	morpthis_widget_set_size(settings, width, 36);
-
-	morpthis_widget_t *back = morpthis_button_create(g_more_screen, "Back", back_to_main, NULL);
-	morpthis_widget_set_pos(back, 20, 160);
-	morpthis_widget_set_size(back, width, 36);
-
+	morpthis_widget_set_pos(g_more_list, 0, 0);
+	morpthis_widget_set_size(g_more_list, g_width, g_height);
+	morpthis_list_set_select_cb(g_more_list, more_selected, NULL);
 	return true;
 }
 
@@ -1763,60 +1758,15 @@ static bool create_queue_screen(void) {
 	morpthis_widget_set_size(g_queue_list, g_width, g_height - 42);
 	morpthis_list_set_select_cb(g_queue_list, queue_selected, NULL);
 
-	int width = (g_width - 12) / 2;
-	if (width < 50) {
+	int button_width = g_width - 40;
+	if (button_width < 80) {
 		return false;
 	}
-	int y = g_height - 38;
 
+	// Clear is an action, not navigation; the edge swipe is the way back.
 	morpthis_widget_t *clear = morpthis_button_create(g_queue_screen, "Clear", queue_clear, NULL);
-	morpthis_widget_set_pos(clear, 0, y);
-	morpthis_widget_set_size(clear, width, 32);
-
-	morpthis_widget_t *back = morpthis_button_create(g_queue_screen, "Back", queue_back, NULL);
-	morpthis_widget_set_pos(back, width + 6, y);
-	morpthis_widget_set_size(back, width, 32);
-
-	return true;
-}
-
-static bool create_search_screen(void) {
-	g_search_screen = morpthis_screen_create("Search");
-	if (!g_search_screen) {
-		return false;
-	}
-
-	g_search_label = morpthis_label_create(g_search_screen, "Search: _");
-	morpthis_widget_set_pos(g_search_label, 0, 0);
-	morpthis_widget_set_size(g_search_label, g_width, 30);
-
-	static const char *const keys[] = {
-		"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-		"N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-		"SP", "DEL", "ESC", "GO",
-	};
-
-	// Six columns: thirty keys in five rows, all of them on the panel. The
-	// player's own keyboard is the same card key, so the shape reads as native.
-	int columns = 6;
-	int cell_w = g_width / columns;
-	int cell_h = 34;
-	int count = (int)(sizeof(keys) / sizeof(keys[0]));
-	int rows = (count + columns - 1) / columns;
-	// Sit on the bottom of the page, as the player's own keyboard does, with
-	// the query line left alone at the top.
-	int start_y = g_height - rows * cell_h - 6;
-	if (start_y < 36) {
-		start_y = 36;
-	}
-	for (int i = 0; i < count; i++) {
-		int row = i / columns;
-		int col = i % columns;
-		morpthis_widget_t *button = morpthis_button_create(g_search_screen, keys[i], search_key,
-												(void *)keys[i]);
-		morpthis_widget_set_pos(button, col * cell_w, start_y + row * cell_h);
-		morpthis_widget_set_size(button, cell_w - 2, cell_h - 2);
-	}
+	morpthis_widget_set_pos(clear, 20, g_height - 38);
+	morpthis_widget_set_size(clear, button_width, 32);
 
 	return true;
 }
@@ -1961,17 +1911,17 @@ static void load_settings_and_start(void) {
 	char error[192] = "";
 	if (!settings_load(&g_settings, error, sizeof(error))) {
 		g_settings_valid = false;
-		update_settings_screen();
+		update_settings_values();
 		show_error("settings", error);
 		return;
 	}
 	g_settings_valid = true;
 	if (!apply_settings(error, sizeof(error))) {
-		update_settings_screen();
+		update_settings_values();
 		show_error("settings", error);
 		return;
 	}
-	update_settings_screen();
+	update_settings_values();
 	if (g_settings.configured) {
 		show_root();
 	} else {
@@ -1998,7 +1948,7 @@ int morpthis_app_main(const morpthis_app_t *app) {
 	tls_set_card_root(morpthis_fs_card_root());
 
 	if (!create_main_screen() || !create_settings_screen() || !create_more_screen() ||
-		!create_queue_screen() || !create_search_screen() || !create_now_screen()) {
+		!create_queue_screen() || !create_now_screen()) {
 		morpthis_loge("subsonic", "could not create a screen");
 		return 1;
 	}
