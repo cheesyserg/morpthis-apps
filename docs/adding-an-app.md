@@ -35,7 +35,7 @@ letters, digits, `.`, `_` and `-`; no spaces.
 | `entry` | **yes** | Binary name, relative to the package root. |
 | `icon` | no | Relative, square; 64×64 or 128×128. |
 | `description` | no | One line, no trailing period. |
-| `min_player` | no | Non-negative; 0 means no requirement. |
+| `min_player` | no | Non-negative; 0 means no requirement. An app that uses API 3 calls (playback, library, system, wireless, net, absolute fs, dialogs) says `3`. |
 | `category` | no | `app` (default) or `game`. Games get the whole panel. |
 | `tier` | no | `light` (default) or `heavy`. Heavy releases playback and caches first. |
 
