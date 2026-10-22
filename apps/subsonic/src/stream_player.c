@@ -615,11 +615,12 @@ void stream_player_pause(bool paused) {
 	}
 	pthread_mutex_lock(&player.lock);
 	player.paused = paused;
+	// Tell the player before waking the worker. A pause drops the queued PCM
+	// instead of playing it out, and a resume lifts the DAC mute before the
+	// first new write can reach the start threshold.
+	morpthis_audio_set_playing(!paused);
 	pthread_cond_broadcast(&player.cond);
 	pthread_mutex_unlock(&player.lock);
-
-	// The status bar follows the user's intent now, not one buffer later.
-	morpthis_audio_set_playing(!paused);
 }
 
 void stream_player_shutdown(void) {

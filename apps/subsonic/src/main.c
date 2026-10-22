@@ -883,7 +883,6 @@ static void toggle_play_pause(void) {
 	}
 	g_paused = !g_paused;
 	stream_player_pause(g_paused);
-	morpthis_audio_set_playing(!g_paused);
 	update_now_screen();
 	update_now_bar();
 	refresh_status();
