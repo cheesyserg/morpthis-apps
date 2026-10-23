@@ -1,0 +1,11 @@
+{
+  "id": "radio",
+  "name": "Radio",
+  "version": "1.0.0",
+  "entry": "radio",
+  "icon": "icon.png",
+  "description": "Browse and stream internet radio, with favourites, recents and your own station addresses",
+  "category": "app",
+  "tier": "heavy",
+  "min_player": 3
+}

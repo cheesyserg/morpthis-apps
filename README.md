@@ -14,8 +14,9 @@ Doom engine from a sibling `doomgeneric` checkout; `nes` runs InfoNES from a
 sibling checkout, with a scanned ROM library and a landscape game canvas;
 `checksum` is a headless tool that the player runs through its `fork`/`execve`
 path; `subsonic` is a network streaming app with its own HTTP/TLS stack and an
-MP3 decoder. They all run through the player's app paths; see the SDK's
-`docs/player-integration.md`.
+MP3/FLAC decoder; `radio` is internet radio with a directory client, MP3 and
+ADTS AAC, HLS, favourites and background play. They all run through the
+player's app paths; see the SDK's `docs/player-integration.md`.
 
 ## Quick start
 
@@ -63,10 +64,12 @@ Set `DOOMGENERIC_DIR` if the patched doomgeneric checkout lives elsewhere; see
 Set `INFONES_DIR` if the InfoNES checkout lives elsewhere; see
 [apps/nes/README.md](apps/nes/README.md) for the ROM folder and controls.
 
-`subsonic` also has a loopback integration test that needs no server:
+`subsonic` and `radio` also have loopback integration tests that need no
+server:
 
 ```sh
 make -C apps/subsonic MORPTHIS_MODE=host test-integration
+make -C apps/radio MORPTHIS_MODE=host test-integration
 ```
 
 ## Layout
@@ -78,7 +81,10 @@ apps/
   doom/            app.json, icon.png, src/, Makefile
   flappybird/      app.json, icon.png, src/main.c, assets/, Makefile
   nes/             app.json, icon.png, src/, tools/, Makefile
+  radio/           app.json, icon.png, src/, tests/, Makefile
   subsonic/        app.json, icon.png, src/, tests/, Makefile
+lib/
+  streaming/       shared HTTP/TLS, HLS, MP3 and AAC sources for streaming apps
 tools/
   validate-manifest.py
   package.sh

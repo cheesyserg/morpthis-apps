@@ -42,5 +42,8 @@ jobs:
         run: make MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" test
       # Packaging logic only: host-mode .pkgmerp files are not shipped. Device
       # packages come from morpthis-build.
+      - name: Run the Radio loopback streaming test
+        run: make -C apps/radio MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" test-integration
+
       - name: Dry-run the packaging
         run: make MORPTHIS_MODE=host MORPTHIS_SDK="$GITHUB_WORKSPACE/sdk" DOOMGENERIC_DIR="$GITHUB_WORKSPACE/doomgeneric/doomgeneric" package
