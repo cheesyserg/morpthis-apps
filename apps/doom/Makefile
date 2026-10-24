@@ -26,7 +26,7 @@ APP_TEST_SCRIPT := sleep:200; press:back
 DOOM_CFLAGS := -O2 -g -std=gnu11 -D_DEFAULT_SOURCE \
 	-DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
 	-DNORMALUNIX -DLINUX -DMORPTHIS_PORT -DFEATURE_SOUND \
-	-I$(DOOMGENERIC_DIR) -Isrc
+	-I$(DOOMGENERIC_DIR) -Isrc -Isrc/opl
 
 include $(MORPTHIS_SDK)/app.mk
 
@@ -54,9 +54,16 @@ DOOM_OBJS := $(patsubst $(DOOMGENERIC_DIR)/%.c,$(BUILD_DIR)/doomobj/%.o,$(DOOM_S
 DOOM_PORT_OBJ := $(BUILD_DIR)/doom_port.o
 DOOM_SOUND_OBJ := $(BUILD_DIR)/doom_sound.o
 
+# Chocolate Doom's OPL music player and the Nuked OPL3 emulator, adapted to
+# render into the app's PCM mixer.
+OPL_SRCS := src/opl/opl3.c src/opl/opl_queue.c src/opl/opl_morpthis.c \
+	src/opl/i_oplmusic.c src/opl/midifile.c
+OPL_OBJS := $(patsubst src/opl/%.c,$(BUILD_DIR)/opl/%.o,$(OPL_SRCS))
+
 # The Doom objects must precede the libraries on the link line.
-MORPTHIS_LIBS := $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ) $(MORPTHIS_LIBS)
-$(APP_BIN): $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ)
+MORPTHIS_LIBS := $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ) $(OPL_OBJS) \
+	$(MORPTHIS_LIBS)
+$(APP_BIN): $(DOOM_OBJS) $(DOOM_PORT_OBJ) $(DOOM_SOUND_OBJ) $(OPL_OBJS)
 
 $(BUILD_DIR)/doomobj/%.o: $(DOOMGENERIC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -66,8 +73,13 @@ $(DOOM_PORT_OBJ): src/doom_port.c src/doom_port.h
 	@mkdir -p $(dir $@)
 	$(MORPTHIS_CC) $(MORPTHIS_CFLAGS) $(DOOM_CFLAGS) -MMD -MP -c $< -o $@
 
-$(DOOM_SOUND_OBJ): src/doom_sound.c
+$(DOOM_SOUND_OBJ): src/doom_sound.c src/doom_music.h
 	@mkdir -p $(dir $@)
 	$(MORPTHIS_CC) $(MORPTHIS_CFLAGS) $(DOOM_CFLAGS) -MMD -MP -c $< -o $@
 
--include $(DOOM_OBJS:.o=.d) $(DOOM_PORT_OBJ:.o=.d) $(DOOM_SOUND_OBJ:.o=.d)
+$(BUILD_DIR)/opl/%.o: src/opl/%.c
+	@mkdir -p $(dir $@)
+	$(MORPTHIS_CC) $(MORPTHIS_CFLAGS) $(DOOM_CFLAGS) -w -MMD -MP -c $< -o $@
+
+-include $(DOOM_OBJS:.o=.d) $(DOOM_PORT_OBJ:.o=.d) $(DOOM_SOUND_OBJ:.o=.d) \
+	$(OPL_OBJS:.o=.d)

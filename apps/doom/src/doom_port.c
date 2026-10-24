@@ -301,19 +301,18 @@ static void *doom_thread_main(void *unused) {
 
 	extern boolean advancedemo;
 
-	char *argv[8];
+	char *argv[7];
 	argv[0] = (char *)"doom";
 	argv[1] = (char *)"-iwad";
 	argv[2] = g_wad_path;
-	argv[3] = (char *)"-nomusic";
-	argv[4] = (char *)"-nogui";
-	argv[5] = (char *)"-mb";
-	argv[6] = (char *)"6";
-	argv[7] = NULL;
+	argv[3] = (char *)"-nogui";
+	argv[4] = (char *)"-mb";
+	argv[5] = (char *)"6";
+	argv[6] = NULL;
 
 	g_fatal_ready = true;
 	if (setjmp(g_fatal_jmp) == 0) {
-		doomgeneric_Create(7, argv);
+		doomgeneric_Create(6, argv);
 
 		// Chocolate Doom leaves the next/previous weapon keys unbound. The
 		// player's side keys send these, so bind them once the config has
