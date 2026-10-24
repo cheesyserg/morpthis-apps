@@ -962,9 +962,24 @@ MORPTHIS_EXPORT void morpthis_app_shutdown(void) {
 		return;
 	}
 	shutting_down = true;
+
+	// The player gives this hook a bounded time before it force-closes the
+	// app, and a force-closed app keeps its package mounted -- which keeps the
+	// card out of USB mass storage. Log both halves so a slow stop is visible
+	// in the log rather than showing up as "mass storage does not work".
+	uint32_t started = morpthis_app_time_ms();
+	// Put both workers on the way out before joining either. A directory
+	// request and a station stop can each be waiting on a socket or a DAC
+	// write; overlapping them keeps the handover inside the player's bound.
+	radio_player_shutdown_begin();
+	radio_client_shutdown_begin();
 	radio_player_shutdown();
+	uint32_t player_done = morpthis_app_time_ms();
 	radio_client_shutdown();
+	uint32_t client_done = morpthis_app_time_ms();
+
 	morpthis_power_release_all();
 	morpthis_audio_set_track(NULL, false);
-	morpthis_logi("radio", "stopped");
+	morpthis_logi("radio", "stopped in %u ms (player %u, directory %u)",
+				  client_done - started, player_done - started, client_done - player_done);
 }

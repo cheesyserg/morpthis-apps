@@ -29,6 +29,10 @@ typedef struct {
 // from the GUI thread and do not wait for the network. The page polls
 // radio_player_get() for the state and the title.
 bool radio_player_init(void);
+// Signals the worker to stop, wakes its socket and aborts every HTTP socket.
+// Idempotent. Call this and radio_client_shutdown_begin() before either join
+// so the two workers wind down in parallel, then call the shutdown calls.
+void radio_player_shutdown_begin(void);
 void radio_player_shutdown(void);
 
 // Starts `station`. A station already playing is replaced; the old socket is

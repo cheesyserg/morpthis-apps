@@ -1258,23 +1258,32 @@ bool radio_player_active(void) {
 	return active;
 }
 
+void radio_player_shutdown_begin(void) {
+	if (player_started) {
+		pthread_mutex_lock(&ctl);
+		quit = true;
+		generation++;
+		command = CMD_STOP;
+		pause_requested = false;
+		pthread_cond_signal(&ctl_wake);
+		pthread_mutex_unlock(&ctl);
+
+		wake_stream();
+	}
+	// A playlist lookup runs a whole http_get() that wake_stream() cannot see.
+	// Aborting every socket is what keeps shutdown inside the player's bound.
+	// It also covers the directory worker: both modules share this HTTP client,
+	// so the app can put them both on the way out before joining either.
+	http_abort_all();
+}
+
 void radio_player_shutdown(void) {
 	if (!player_started) {
+		http_abort_all();
 		return;
 	}
 
-	pthread_mutex_lock(&ctl);
-	quit = true;
-	generation++;
-	command = CMD_STOP;
-	pause_requested = false;
-	pthread_cond_signal(&ctl_wake);
-	pthread_mutex_unlock(&ctl);
-
-	wake_stream();
-	// A playlist lookup runs a whole http_get() that wake_stream() cannot see.
-	// Aborting every socket is what keeps shutdown inside the player's bound.
-	http_abort_all();
+	radio_player_shutdown_begin();
 	pthread_join(player_thread, NULL);
 	player_started = false;
 

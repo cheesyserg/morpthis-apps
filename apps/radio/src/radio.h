@@ -64,6 +64,7 @@ typedef enum {
 // copies what it keeps when the serial changes. The calls are safe from the
 // GUI thread and never block on the network.
 bool radio_client_init(void);
+void radio_client_shutdown_begin(void);
 void radio_client_shutdown(void);
 
 // Each request returns the id the answer will carry. A page that was replaced

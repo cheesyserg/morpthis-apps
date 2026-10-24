@@ -768,7 +768,7 @@ int radio_client_copy_stations(radio_station_t *out, int max) {
 	return count;
 }
 
-void radio_client_shutdown(void) {
+void radio_client_shutdown_begin(void) {
 	if (!started) {
 		return;
 	}
@@ -776,6 +776,13 @@ void radio_client_shutdown(void) {
 	quit = true;
 	pthread_cond_broadcast(&wake);
 	pthread_mutex_unlock(&lock);
+}
+
+void radio_client_shutdown(void) {
+	if (!started) {
+		return;
+	}
+	radio_client_shutdown_begin();
 
 	// A request may be blocked in connect() or recv(). Wake it rather than
 	// waiting out the network timeout, then join while the code is still
